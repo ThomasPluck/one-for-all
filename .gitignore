@@ -1,0 +1,5 @@
+node_modules/
+dist/
+*.vsix
+.venv/
+ofa-config.json

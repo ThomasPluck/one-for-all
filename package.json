@@ -1,0 +1,48 @@
+{
+  "name": "one-for-all",
+  "displayName": "One-For-All",
+  "description": "A graphical parametric analog design flow",
+  "version": "0.0.1",
+  "publisher": "ofa",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ofa-sidebar",
+          "title": "One-For-All",
+          "icon": "docs/eyesore_logo.png"
+        }
+      ]
+    },
+    "views": {
+      "ofa-sidebar": [
+        {
+          "type": "webview",
+          "id": "ofa.sidebarView",
+          "name": "One-For-All"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.3.0"
+  }
+}

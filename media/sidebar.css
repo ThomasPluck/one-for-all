@@ -1,0 +1,73 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+  color: var(--vscode-foreground);
+  background: transparent;
+  padding: 12px;
+}
+
+.container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+.logo {
+  width: 100%;
+  max-width: 220px;
+  border-radius: 6px;
+}
+
+.checks {
+  list-style: none;
+  width: 100%;
+}
+
+.checks li {
+  padding: 6px 8px;
+  border-radius: 4px;
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+
+.checks li.pass {
+  color: var(--vscode-testing-iconPassed, #73c991);
+}
+
+.checks li.fail {
+  color: var(--vscode-testing-iconFailed, #f14c4c);
+}
+
+.pdk-btn {
+  width: 100%;
+  padding: 8px 16px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+}
+
+.pdk-btn:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
+.pdk-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.ready {
+  text-align: center;
+  font-weight: 600;
+  color: var(--vscode-testing-iconPassed, #73c991);
+}
