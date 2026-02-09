@@ -126,6 +126,7 @@ export async function initializeEnvironment(
   const config: OfaConfig = {
     pdk: pdk.id,
     pdkPackage: pdk.pipPackage,
+    pythonImport: pdk.pythonImport,
   };
   fs.writeFileSync(
     path.join(root, "ofa-config.json"),

@@ -20,7 +20,7 @@
         {
           "id": "ofa-sidebar",
           "title": "One-For-All",
-          "icon": "docs/eyesore_logo.png"
+          "icon": "docs/ofa.png"
         }
       ]
     },
@@ -32,7 +32,25 @@
           "name": "One-For-All"
         }
       ]
-    }
+    },
+    "customEditors": [
+      {
+        "viewType": "ofa.schematicEditor",
+        "displayName": "OFA Schematic Editor",
+        "selector": [
+          {
+            "filenamePattern": "*.ofa"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "commands": [
+      {
+        "command": "ofa.newSchematic",
+        "title": "OFA: New Schematic"
+      }
+    ]
   },
   "scripts": {
     "compile": "node esbuild.mjs",
