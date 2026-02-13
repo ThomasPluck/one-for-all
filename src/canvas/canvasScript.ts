@@ -36,11 +36,45 @@ interface OfaComponent {
   _cache?: { xsize: number; ysize: number; ports: PdkPortInfo[] };
 }
 
+type JunctionStyle = "h2" | "v2" | "d2" | "x4" | "hp" | "vp";
+
+interface OfaJunction {
+  id: string;
+  x: number;
+  y: number;
+  style: JunctionStyle;
+}
+
+interface OfaWire {
+  id: string;
+  layer: string;
+  width: number;
+  startId: string;
+  startType: "port" | "junction";
+  startComponentId?: string;
+  endId: string;
+  endType: "port" | "junction";
+  endComponentId?: string;
+}
+
 interface DocumentData {
   version: number;
   components: OfaComponent[];
-  junctions: unknown[];
-  wires: unknown[];
+  junctions: OfaJunction[];
+  wires: OfaWire[];
+}
+
+interface WireAnchor {
+  type: "port" | "junction";
+  id: string;
+  componentId?: string;
+  x: number;
+  y: number;
+}
+
+interface SelectionState {
+  type: "none" | "component" | "junction" | "wire";
+  id: string | null;
 }
 
 declare function acquireVsCodeApi(): {
@@ -49,32 +83,26 @@ declare function acquireVsCodeApi(): {
   setState(state: unknown): void;
 };
 
-// --- Layer color map ---
+// --- Layer color map (populated from PDK — empty until pdkData arrives) ---
 
-const LAYER_COLORS: Record<string, string> = {
-  "Metal1": "#4caf50",
-  "Metal2": "#2196f3",
-  "Metal3": "#ff9800",
-  "Metal4": "#9c27b0",
-  "Metal5": "#f44336",
-  "TopMetal1": "#00bcd4",
-  "TopMetal2": "#ffeb3b",
-  "Poly": "#e91e63",
-  "Active": "#8bc34a",
-};
+const LAYER_COLORS: Record<string, string> = {};
+const GDS_LAYER_NAMES: Record<number, string> = {};
 
-// GDS layer number → name mapping (IHP SG13G2 common layers)
-const GDS_LAYER_NAMES: Record<number, string> = {
-  1: "Active",
-  5: "Poly",
-  8: "Metal1",
-  10: "Metal2",
-  30: "Metal3",
-  50: "Metal4",
-  67: "Metal5",
-  126: "TopMetal1",
-  134: "TopMetal2",
-};
+function applyPdkLayers(layers: { name: string; gds_layer: [number, number]; color: string }[]): void {
+
+  for (const layer of layers) {
+    LAYER_COLORS[layer.name] = layer.color;
+    GDS_LAYER_NAMES[layer.gds_layer[0]] = layer.name;
+  }
+
+  wireLayerSelect.innerHTML = "";
+  for (const name of Object.keys(LAYER_COLORS)) {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name;
+    wireLayerSelect.appendChild(opt);
+  }
+}
 
 function layerColor(layer: [number, number] | null): string {
   if (!layer) { return "#888"; }
@@ -88,6 +116,10 @@ function layerName(layer: [number, number] | null): string {
   return GDS_LAYER_NAMES[layer[0]] || `Layer ${layer[0]}`;
 }
 
+// --- Constants ---
+
+const JUNCTION_RADIUS = 0.15;
+
 // --- State ---
 
 const vscode = acquireVsCodeApi();
@@ -95,12 +127,13 @@ const vscode = acquireVsCodeApi();
 const canvas = document.getElementById("ofaCanvas") as HTMLCanvasElement;
 const ctx = canvas.getContext("2d")!;
 const componentSelect = document.getElementById("componentSelect") as HTMLSelectElement;
-const junctionSelect = document.getElementById("junctionSelect") as HTMLSelectElement;
 const selectionToolbar = document.getElementById("selectionToolbar") as HTMLDivElement;
 const btnRotate = document.getElementById("btnRotate") as HTMLButtonElement;
 const btnFlipH = document.getElementById("btnFlipH") as HTMLButtonElement;
 const btnFlipV = document.getElementById("btnFlipV") as HTMLButtonElement;
 const btnExportGds = document.getElementById("btnExportGds") as HTMLButtonElement;
+const btnWireMode = document.getElementById("btnWireMode") as HTMLButtonElement;
+const wireLayerSelect = document.getElementById("wireLayerSelect") as HTMLSelectElement;
 
 // Default zoom 200x so sub-micron devices (e.g. 0.42 x 0.15 um) are visible
 const camera: Camera = { x: 0, y: 0, zoom: 200 };
@@ -112,10 +145,16 @@ let documentData: DocumentData | null = null;
 let pdkCells: PdkCellInfo[] = [];
 
 // --- Selection & interaction state ---
-let selectedComponentId: string | null = null;
+let selection: SelectionState = { type: "none", id: null };
 let isDragging = false;
 let dragStartWorld = { x: 0, y: 0 };
 let dragOrigPos = { x: 0, y: 0 };
+
+// --- Wire mode state ---
+let wireMode = false;
+let wireDrawing = false;
+let wireStartAnchor: WireAnchor | null = null;
+let wirePreviewEnd: { x: number; y: number } | null = null;
 
 // Runtime cache for per-component sizes (from re-queries after param edits)
 const componentSizeCache = new Map<string, { xsize: number; ysize: number; ports: PdkPortInfo[] }>();
@@ -132,17 +171,14 @@ function getCellInfo(cellName: string): PdkCellInfo | undefined {
 }
 
 function getDeviceSize(comp: OfaComponent): { w: number; h: number } {
-  // 1. Per-component cache (from re-query after param edit)
   const cached = componentSizeCache.get(comp.id);
   if (cached) {
     return { w: Math.max(cached.xsize, 0.05), h: Math.max(cached.ysize, 0.05) };
   }
-  // 2. PDK cell defaults (from bulk query)
   const info = getCellInfo(comp.cell);
   if (info) {
     return { w: Math.max(info.xsize, 0.05), h: Math.max(info.ysize, 0.05) };
   }
-  // 3. Ultimate fallback
   return { w: 1, h: 1 };
 }
 
@@ -155,18 +191,241 @@ function screenToWorld(sx: number, sy: number): { x: number; y: number } {
 }
 
 function getSelectedComponent(): OfaComponent | null {
-  if (!documentData || !selectedComponentId) { return null; }
-  return documentData.components.find((c) => c.id === selectedComponentId) ?? null;
+  if (!documentData || selection.type !== "component" || !selection.id) { return null; }
+  return documentData.components.find((c) => c.id === selection.id) ?? null;
+}
+
+function getSelectedJunction(): OfaJunction | null {
+  if (!documentData || selection.type !== "junction" || !selection.id) { return null; }
+  return documentData.junctions.find((j) => j.id === selection.id) ?? null;
+}
+
+function getSelectedWire(): OfaWire | null {
+  if (!documentData || selection.type !== "wire" || !selection.id) { return null; }
+  return documentData.wires.find((w) => w.id === selection.id) ?? null;
+}
+
+function clearSelection(): void {
+  selection = { type: "none", id: null };
+  updateToolbarSelection();
 }
 
 function updateHoverCursor(worldX: number, worldY: number): void {
-  if (spaceHeld) { return; }
+  if (spaceHeld || wireMode) { return; }
+  const j = hitTestJunction(worldX, worldY);
+  if (j) { canvas.style.cursor = "pointer"; return; }
   const comp = hitTestComponent(worldX, worldY);
   if (comp) {
-    canvas.style.cursor = comp.id === selectedComponentId ? "move" : "pointer";
+    canvas.style.cursor = selection.type === "component" && selection.id === comp.id ? "move" : "pointer";
     return;
   }
+  const w = hitTestWire(worldX, worldY);
+  if (w) { canvas.style.cursor = "pointer"; return; }
   canvas.style.cursor = "default";
+}
+
+// --- Port world transform ---
+
+function transformPortToWorld(comp: OfaComponent, port: PdkPortInfo): { x: number; y: number } {
+  const { w, h } = getDeviceSize(comp);
+  let px = port.x;
+  let py = port.y;
+
+  if (comp.flipH) { px = w - px; }
+  if (comp.flipV) { py = h - py; }
+  if (comp.rotation) {
+    const cx = w / 2, cy = h / 2;
+    const rad = (comp.rotation * Math.PI) / 180;
+    const rx = px - cx, ry = py - cy;
+    px = cx + rx * Math.cos(rad) - ry * Math.sin(rad);
+    py = cy + rx * Math.sin(rad) + ry * Math.cos(rad);
+  }
+  return { x: comp.x + px, y: comp.y + py };
+}
+
+function resolveAnchorPosition(id: string, type: "port" | "junction", componentId?: string): { x: number; y: number } | null {
+  if (type === "junction") {
+    const j = documentData?.junctions.find((jn) => jn.id === id);
+    return j ? { x: j.x, y: j.y } : null;
+  }
+  if (!componentId || !documentData) { return null; }
+  const comp = documentData.components.find((c) => c.id === componentId);
+  if (!comp) { return null; }
+  const cached = componentSizeCache.get(comp.id);
+  const info = getCellInfo(comp.cell);
+  const ports = cached ? cached.ports : (info ? info.ports : []);
+  const port = ports.find((p) => p.name === id);
+  if (!port) { return null; }
+  return transformPortToWorld(comp, port);
+}
+
+// --- Wire helpers ---
+
+function snapWireEnd(startX: number, startY: number, mouseX: number, mouseY: number): { x: number; y: number } {
+  const dx = Math.abs(mouseX - startX);
+  const dy = Math.abs(mouseY - startY);
+  if (dx >= dy) {
+    return { x: Math.round(mouseX * 100) / 100, y: startY };
+  } else {
+    return { x: startX, y: Math.round(mouseY * 100) / 100 };
+  }
+}
+
+function pointToSegmentDist(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
+  const abx = bx - ax, aby = by - ay;
+  const apx = px - ax, apy = py - ay;
+  const lenSq = abx * abx + aby * aby;
+  const t = lenSq > 0 ? Math.max(0, Math.min(1, (apx * abx + apy * aby) / lenSq)) : 0;
+  const cx = ax + t * abx, cy = ay + t * aby;
+  return Math.hypot(px - cx, py - cy);
+}
+
+function cleanupOrphanedJunctions(): void {
+  if (!documentData) { return; }
+  documentData.junctions = documentData.junctions.filter((j) => {
+    return documentData!.wires.some((w) =>
+      (w.startType === "junction" && w.startId === j.id) ||
+      (w.endType === "junction" && w.endId === j.id)
+    );
+  });
+}
+
+function deleteComponentCascade(compId: string): void {
+  if (!documentData) { return; }
+  documentData.components = documentData.components.filter((c) => c.id !== compId);
+  documentData.wires = documentData.wires.filter((w) =>
+    !(w.startType === "port" && w.startComponentId === compId) &&
+    !(w.endType === "port" && w.endComponentId === compId)
+  );
+  cleanupOrphanedJunctions();
+}
+
+function deleteJunctionCascade(jId: string): void {
+  if (!documentData) { return; }
+  documentData.junctions = documentData.junctions.filter((j) => j.id !== jId);
+  documentData.wires = documentData.wires.filter((w) =>
+    !(w.startType === "junction" && w.startId === jId) &&
+    !(w.endType === "junction" && w.endId === jId)
+  );
+}
+
+function deleteWireCascade(wId: string): void {
+  if (!documentData) { return; }
+  documentData.wires = documentData.wires.filter((w) => w.id !== wId);
+  cleanupOrphanedJunctions();
+}
+
+// --- Junction auto-coloring ---
+
+function computeJunctionColors(junction: OfaJunction): string[] {
+  if (!documentData) { return ["#888", "#888", "#888", "#888"]; }
+
+  const connected = documentData.wires.filter((w) =>
+    (w.startType === "junction" && w.startId === junction.id) ||
+    (w.endType === "junction" && w.endId === junction.id)
+  );
+
+  if (connected.length === 0) { return ["#888", "#888", "#888", "#888"]; }
+
+  const dirs: { layer: string; dir: "N" | "E" | "S" | "W" }[] = [];
+  for (const wire of connected) {
+    const isStart = wire.startType === "junction" && wire.startId === junction.id;
+    const otherPos = resolveAnchorPosition(
+      isStart ? wire.endId : wire.startId,
+      isStart ? wire.endType : wire.startType,
+      isStart ? wire.endComponentId : wire.startComponentId,
+    );
+    if (!otherPos) { continue; }
+    const ddx = otherPos.x - junction.x;
+    const ddy = otherPos.y - junction.y;
+    let dir: "N" | "E" | "S" | "W";
+    if (Math.abs(ddx) > Math.abs(ddy)) {
+      dir = ddx > 0 ? "E" : "W";
+    } else {
+      dir = ddy > 0 ? "S" : "N";
+    }
+    dirs.push({ layer: wire.layer, dir });
+  }
+
+  const colorOf = (layer: string) => LAYER_COLORS[layer] || "#888";
+  const fallback = connected[0]?.layer || "";
+
+  switch (junction.style) {
+    case "h2": {
+      const left = dirs.find((d) => d.dir === "W");
+      const right = dirs.find((d) => d.dir === "E");
+      return [colorOf(left?.layer || fallback), colorOf(right?.layer || fallback)];
+    }
+    case "v2": {
+      const top = dirs.find((d) => d.dir === "N");
+      const bottom = dirs.find((d) => d.dir === "S");
+      return [colorOf(top?.layer || fallback), colorOf(bottom?.layer || fallback)];
+    }
+    case "d2": {
+      return [colorOf(connected[0]?.layer || ""), colorOf(connected[1]?.layer || connected[0]?.layer || "")];
+    }
+    case "x4": {
+      const n = dirs.find((d) => d.dir === "N");
+      const e = dirs.find((d) => d.dir === "E");
+      const s = dirs.find((d) => d.dir === "S");
+      const w = dirs.find((d) => d.dir === "W");
+      return [colorOf(n?.layer || fallback), colorOf(e?.layer || fallback),
+              colorOf(s?.layer || fallback), colorOf(w?.layer || fallback)];
+    }
+    case "hp": {
+      const left = dirs.find((d) => d.dir === "W");
+      const right = dirs.find((d) => d.dir === "E");
+      return [colorOf(left?.layer || fallback), colorOf(right?.layer || fallback)];
+    }
+    case "vp": {
+      const top = dirs.find((d) => d.dir === "N");
+      const bottom = dirs.find((d) => d.dir === "S");
+      return [colorOf(top?.layer || fallback), colorOf(bottom?.layer || fallback)];
+    }
+  }
+  return ["#888"];
+}
+
+function autoUpdateJunctionStyle(junctionId: string): void {
+  if (!documentData) { return; }
+  const junction = documentData.junctions.find((j) => j.id === junctionId);
+  if (!junction) { return; }
+
+  // Via-port junctions are explicitly user-chosen — don't auto-change
+  if (junction.style === "hp" || junction.style === "vp") { return; }
+
+  const connected = documentData.wires.filter((w) =>
+    (w.startType === "junction" && w.startId === junctionId) ||
+    (w.endType === "junction" && w.endId === junctionId)
+  );
+
+  const dirSet = new Set<string>();
+  for (const wire of connected) {
+    const isStart = wire.startType === "junction" && wire.startId === junctionId;
+    const otherPos = resolveAnchorPosition(
+      isStart ? wire.endId : wire.startId,
+      isStart ? wire.endType : wire.startType,
+      isStart ? wire.endComponentId : wire.startComponentId,
+    );
+    if (!otherPos) { continue; }
+    const ddx = otherPos.x - junction.x;
+    const ddy = otherPos.y - junction.y;
+    if (Math.abs(ddx) > Math.abs(ddy)) {
+      dirSet.add(ddx > 0 ? "E" : "W");
+    } else {
+      dirSet.add(ddy > 0 ? "S" : "N");
+    }
+  }
+
+  if (connected.length >= 3 || dirSet.size >= 3) {
+    junction.style = "x4";
+  } else if (dirSet.has("N") && dirSet.has("S") && !dirSet.has("E") && !dirSet.has("W")) {
+    junction.style = "v2";
+  } else if (dirSet.has("E") && dirSet.has("W") && !dirSet.has("N") && !dirSet.has("S")) {
+    junction.style = "h2";
+  } else {
+    junction.style = "d2";
+  }
 }
 
 // --- Resize ---
@@ -186,10 +445,8 @@ resizeCanvas();
 // --- Grid ---
 
 function drawGrid(w: number, h: number): void {
-  // Adaptive grid: pick a grid spacing so lines are ~20-100px apart on screen
   const minScreenSpacing = 20;
   const idealScreenSpacing = 50;
-  // Find a "nice" world-space grid size
   const rawSpacing = idealScreenSpacing / camera.zoom;
   const magnitude = Math.pow(10, Math.floor(Math.log10(rawSpacing)));
   const candidates = [magnitude * 0.1, magnitude * 0.5, magnitude, magnitude * 5, magnitude * 10];
@@ -210,7 +467,6 @@ function drawGrid(w: number, h: number): void {
   const right = left + w / camera.zoom;
   const bottom = top + h / camera.zoom;
 
-  // Minor grid
   ctx.strokeStyle = "rgba(255, 255, 255, 0.06)";
   const startX = Math.floor(left / gridSize) * gridSize;
   const startY = Math.floor(top / gridSize) * gridSize;
@@ -226,7 +482,6 @@ function drawGrid(w: number, h: number): void {
   }
   ctx.stroke();
 
-  // Major grid
   ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
   const majorStartX = Math.floor(left / majorSize) * majorSize;
   const majorStartY = Math.floor(top / majorSize) * majorSize;
@@ -280,10 +535,137 @@ function applyComponentTransform(comp: OfaComponent, w: number, h: number): void
   }
 }
 
+// --- Wire rendering ---
+
+function drawWires(): void {
+  if (!documentData) { return; }
+
+  for (const wire of documentData.wires) {
+    const start = resolveAnchorPosition(wire.startId, wire.startType, wire.startComponentId);
+    const end = resolveAnchorPosition(wire.endId, wire.endType, wire.endComponentId);
+    if (!start || !end) { continue; }
+
+    const color = LAYER_COLORS[wire.layer] || "#888";
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = Math.max(wire.width, 0.05);
+    ctx.lineCap = "round";
+    ctx.globalAlpha = 0.7;
+    ctx.beginPath();
+    ctx.moveTo(start.x, start.y);
+    ctx.lineTo(end.x, end.y);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Wire preview during drawing
+  if (wireDrawing && wireStartAnchor && wirePreviewEnd) {
+    const snapped = snapWireEnd(wireStartAnchor.x, wireStartAnchor.y, wirePreviewEnd.x, wirePreviewEnd.y);
+    const color = LAYER_COLORS[wireLayerSelect.value] || "#888";
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 0.1;
+    ctx.lineCap = "round";
+    ctx.globalAlpha = 0.4;
+    ctx.setLineDash([0.1, 0.05]);
+    ctx.beginPath();
+    ctx.moveTo(wireStartAnchor.x, wireStartAnchor.y);
+    ctx.lineTo(snapped.x, snapped.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+}
+
+// --- Junction rendering ---
+
+function drawJunctions(): void {
+  if (!documentData) { return; }
+
+  for (const junction of documentData.junctions) {
+    const colors = computeJunctionColors(junction);
+    const r = JUNCTION_RADIUS;
+
+    ctx.save();
+    ctx.translate(junction.x, junction.y);
+
+    switch (junction.style) {
+      case "h2":
+        ctx.fillStyle = colors[0];
+        ctx.beginPath();
+        ctx.arc(0, 0, r, Math.PI / 2, -Math.PI / 2);
+        ctx.fill();
+        ctx.fillStyle = colors[1];
+        ctx.beginPath();
+        ctx.arc(0, 0, r, -Math.PI / 2, Math.PI / 2);
+        ctx.fill();
+        break;
+      case "v2":
+        ctx.fillStyle = colors[0];
+        ctx.beginPath();
+        ctx.arc(0, 0, r, Math.PI, 0);
+        ctx.fill();
+        ctx.fillStyle = colors[1];
+        ctx.beginPath();
+        ctx.arc(0, 0, r, 0, Math.PI);
+        ctx.fill();
+        break;
+      case "d2":
+        ctx.fillStyle = colors[0];
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.arc(0, 0, r, -Math.PI * 0.75, Math.PI * 0.25);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = colors[1];
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.arc(0, 0, r, Math.PI * 0.25, -Math.PI * 0.75);
+        ctx.closePath();
+        ctx.fill();
+        break;
+      case "x4":
+        for (let q = 0; q < 4; q++) {
+          ctx.fillStyle = colors[q] || "#888";
+          ctx.beginPath();
+          ctx.moveTo(0, 0);
+          ctx.arc(0, 0, r, (q - 1.5) * Math.PI / 2, (q - 0.5) * Math.PI / 2);
+          ctx.closePath();
+          ctx.fill();
+        }
+        break;
+      case "hp":
+        ctx.fillStyle = colors[0];
+        ctx.fillRect(-r, -r, r, r * 2);
+        ctx.fillStyle = colors[1];
+        ctx.fillRect(0, -r, r, r * 2);
+        break;
+      case "vp":
+        ctx.fillStyle = colors[0];
+        ctx.fillRect(-r, -r, r * 2, r);
+        ctx.fillStyle = colors[1];
+        ctx.fillRect(-r, 0, r * 2, r);
+        break;
+    }
+
+    // Outline
+    ctx.strokeStyle = "rgba(255,255,255,0.5)";
+    ctx.lineWidth = 0.5 / camera.zoom;
+    if (junction.style === "hp" || junction.style === "vp") {
+      ctx.strokeRect(-r, -r, r * 2, r * 2);
+    } else {
+      ctx.beginPath();
+      ctx.arc(0, 0, r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+}
+
 // --- Device rendering ---
 
 function fitText(text: string, maxW: number, maxH: number, maxFontSize: number): number {
-  // Binary search for the largest font size that fits within maxW x maxH
   let lo = 0;
   let hi = maxFontSize;
   for (let i = 0; i < 10; i++) {
@@ -317,11 +699,11 @@ function drawComponents(): void {
     ctx.fillRect(0, 0, w, h);
     ctx.strokeRect(0, 0, w, h);
 
-    // Device labels — two lines: cell name (top) and ID (bottom), scaled to fit
+    // Device labels
     const padX = w * 0.1;
     const padY = h * 0.1;
     const availW = w - padX * 2;
-    const availH = (h - padY * 2) / 2; // half height for each line
+    const availH = (h - padY * 2) / 2;
 
     const shortId = comp.id.substring(0, 6);
     const cellFontSize = fitText(comp.cell, availW, availH * 0.9, h * 0.4);
@@ -330,18 +712,16 @@ function drawComponents(): void {
     ctx.textAlign = "center";
     ctx.fillStyle = "rgba(220, 230, 255, 0.9)";
 
-    // Cell name — upper half
     ctx.font = `bold ${cellFontSize}px sans-serif`;
     ctx.textBaseline = "bottom";
     ctx.fillText(comp.cell, w / 2, h / 2);
 
-    // ID — lower half
     ctx.font = `${idFontSize}px sans-serif`;
     ctx.fillStyle = "rgba(180, 200, 230, 0.7)";
     ctx.textBaseline = "top";
     ctx.fillText(shortId, w / 2, h / 2);
 
-    // Ports (use per-component cache if available, otherwise PDK defaults)
+    // Ports
     const cachedSize = componentSizeCache.get(comp.id);
     const ports = cachedSize ? cachedSize.ports : (info ? info.ports : []);
     if (ports.length > 0) {
@@ -355,7 +735,6 @@ function drawComponents(): void {
           portSize,
           portSize
         );
-        // Port label
         const pFontSize = Math.max(0.8, portSize * 1.5);
         ctx.font = `${pFontSize}px sans-serif`;
         ctx.fillStyle = color;
@@ -372,21 +751,55 @@ function drawComponents(): void {
 // --- Selection rendering ---
 
 function drawSelection(): void {
-  const comp = getSelectedComponent();
-  if (!comp) { return; }
-  const { w, h } = getDeviceSize(comp);
+  if (selection.type === "component") {
+    const comp = getSelectedComponent();
+    if (!comp) { return; }
+    const { w, h } = getDeviceSize(comp);
 
-  // Dashed selection border (in component-local space with transforms)
-  ctx.save();
-  ctx.translate(comp.x, comp.y);
-  applyComponentTransform(comp, w, h);
-
-  ctx.strokeStyle = "#ffcc00";
-  ctx.lineWidth = 2 / camera.zoom;
-  ctx.setLineDash([6 / camera.zoom, 4 / camera.zoom]);
-  ctx.strokeRect(0, 0, w, h);
-  ctx.setLineDash([]);
-  ctx.restore();
+    ctx.save();
+    ctx.translate(comp.x, comp.y);
+    applyComponentTransform(comp, w, h);
+    ctx.strokeStyle = "#ffcc00";
+    ctx.lineWidth = 2 / camera.zoom;
+    ctx.setLineDash([6 / camera.zoom, 4 / camera.zoom]);
+    ctx.strokeRect(0, 0, w, h);
+    ctx.setLineDash([]);
+    ctx.restore();
+  } else if (selection.type === "junction") {
+    const j = getSelectedJunction();
+    if (!j) { return; }
+    ctx.save();
+    ctx.strokeStyle = "#ffcc00";
+    ctx.lineWidth = 2 / camera.zoom;
+    ctx.setLineDash([6 / camera.zoom, 4 / camera.zoom]);
+    const sr = JUNCTION_RADIUS * 1.4;
+    if (j.style === "hp" || j.style === "vp") {
+      ctx.strokeRect(j.x - sr, j.y - sr, sr * 2, sr * 2);
+    } else {
+      ctx.beginPath();
+      ctx.arc(j.x, j.y, sr, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.restore();
+  } else if (selection.type === "wire") {
+    const w = getSelectedWire();
+    if (!w) { return; }
+    const start = resolveAnchorPosition(w.startId, w.startType, w.startComponentId);
+    const end = resolveAnchorPosition(w.endId, w.endType, w.endComponentId);
+    if (!start || !end) { return; }
+    ctx.save();
+    ctx.strokeStyle = "#ffcc00";
+    ctx.lineWidth = w.width + 0.08;
+    ctx.lineCap = "round";
+    ctx.setLineDash([0.1, 0.05]);
+    ctx.beginPath();
+    ctx.moveTo(start.x, start.y);
+    ctx.lineTo(end.x, end.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
 }
 
 // --- Legend (screen-space) ---
@@ -402,13 +815,11 @@ function drawLegend(w: number, _h: number): void {
   const x = w - legendW - 12;
   const y = 12;
 
-  // Background
   ctx.fillStyle = "rgba(30, 30, 30, 0.75)";
   ctx.beginPath();
   ctx.roundRect(x, y, legendW, legendH, 4);
   ctx.fill();
 
-  // Entries
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
   ctx.font = "11px sans-serif";
@@ -417,13 +828,11 @@ function drawLegend(w: number, _h: number): void {
     const [name, color] = entries[i];
     const ey = y + padding + i * lineHeight + lineHeight / 2;
 
-    // Colored circle
     ctx.fillStyle = color;
     ctx.beginPath();
     ctx.arc(x + padding + circleR, ey, circleR, 0, Math.PI * 2);
     ctx.fill();
 
-    // Label
     ctx.fillStyle = "#ccc";
     ctx.fillText(name, x + padding + circleR * 2 + 6, ey);
   }
@@ -432,10 +841,8 @@ function drawLegend(w: number, _h: number): void {
 // --- Scale bar (screen-space, bottom-right) ---
 
 function drawScaleBar(w: number, h: number): void {
-  // Pick a "nice" world-space distance that fills ~100-200px on screen
   const targetScreenPx = 150;
   const rawWorldDist = targetScreenPx / camera.zoom;
-  // Round to a nice number
   const magnitude = Math.pow(10, Math.floor(Math.log10(rawWorldDist)));
   const candidates = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100];
   let worldDist = candidates[0];
@@ -447,7 +854,6 @@ function drawScaleBar(w: number, h: number): void {
   }
   const barPx = worldDist * camera.zoom;
 
-  // Format label
   let label: string;
   if (worldDist >= 1) {
     label = `${worldDist} \u00B5m`;
@@ -460,21 +866,16 @@ function drawScaleBar(w: number, h: number): void {
   const x = w - barPx - padding;
   const y = h - padding - barHeight;
 
-  // Background
   ctx.fillStyle = "rgba(30, 30, 30, 0.75)";
   ctx.beginPath();
   ctx.roundRect(x - 8, y - 20, barPx + 16, barHeight + 28, 4);
   ctx.fill();
 
-  // Bar
   ctx.fillStyle = "#ccc";
   ctx.fillRect(x, y, barPx, barHeight);
-
-  // Ticks at ends
   ctx.fillRect(x, y - 4, 2, barHeight + 8);
   ctx.fillRect(x + barPx - 2, y - 4, 2, barHeight + 8);
 
-  // Label
   ctx.font = "11px sans-serif";
   ctx.fillStyle = "#ccc";
   ctx.textAlign = "center";
@@ -498,7 +899,9 @@ function render(): void {
 
   drawGrid(w, h);
   drawOrigin();
+  drawWires();
   drawComponents();
+  drawJunctions();
   drawSelection();
 
   ctx.restore();
@@ -549,11 +952,21 @@ btnExportGds.addEventListener("click", () => {
   vscode.postMessage({ type: "exportGds" });
 });
 
+btnWireMode.addEventListener("click", () => {
+  wireMode = !wireMode;
+  btnWireMode.classList.toggle("active", wireMode);
+  if (!wireMode) {
+    wireDrawing = false;
+    wireStartAnchor = null;
+    wirePreviewEnd = null;
+  }
+  canvas.style.cursor = wireMode ? "crosshair" : "default";
+});
+
 // --- Hit testing ---
 
 function hitTestComponent(worldX: number, worldY: number): OfaComponent | null {
   if (!documentData) { return null; }
-  // Iterate in reverse so topmost (last-placed) component is hit first
   for (let i = documentData.components.length - 1; i >= 0; i--) {
     const comp = documentData.components[i];
     const { w, h } = getDeviceSize(comp);
@@ -562,6 +975,61 @@ function hitTestComponent(worldX: number, worldY: number): OfaComponent | null {
       worldY >= comp.y && worldY <= comp.y + h
     ) {
       return comp;
+    }
+  }
+  return null;
+}
+
+function hitTestJunction(worldX: number, worldY: number): OfaJunction | null {
+  if (!documentData) { return null; }
+  const r = JUNCTION_RADIUS;
+  for (let i = documentData.junctions.length - 1; i >= 0; i--) {
+    const j = documentData.junctions[i];
+    const dx = worldX - j.x;
+    const dy = worldY - j.y;
+    if (j.style === "hp" || j.style === "vp") {
+      if (Math.abs(dx) <= r && Math.abs(dy) <= r) { return j; }
+    } else {
+      if (dx * dx + dy * dy <= r * r) { return j; }
+    }
+  }
+  return null;
+}
+
+function hitTestWire(worldX: number, worldY: number): OfaWire | null {
+  if (!documentData) { return null; }
+  const threshold = Math.max(0.1, 5 / camera.zoom);
+  for (let i = documentData.wires.length - 1; i >= 0; i--) {
+    const wire = documentData.wires[i];
+    const start = resolveAnchorPosition(wire.startId, wire.startType, wire.startComponentId);
+    const end = resolveAnchorPosition(wire.endId, wire.endType, wire.endComponentId);
+    if (!start || !end) { continue; }
+    const dist = pointToSegmentDist(worldX, worldY, start.x, start.y, end.x, end.y);
+    if (dist <= Math.max(wire.width / 2, threshold)) { return wire; }
+  }
+  return null;
+}
+
+function hitTestPort(worldX: number, worldY: number): WireAnchor | null {
+  if (!documentData) { return null; }
+  for (const comp of documentData.components) {
+    const cached = componentSizeCache.get(comp.id);
+    const info = getCellInfo(comp.cell);
+    const ports = cached ? cached.ports : (info ? info.ports : []);
+    const { w, h } = getDeviceSize(comp);
+    const portSize = Math.max(0.3, Math.min(w, h) * 0.08);
+    for (const port of ports) {
+      const worldPort = transformPortToWorld(comp, port);
+      if (Math.abs(worldX - worldPort.x) <= portSize &&
+          Math.abs(worldY - worldPort.y) <= portSize) {
+        return {
+          type: "port",
+          id: port.name,
+          componentId: comp.id,
+          x: worldPort.x,
+          y: worldPort.y,
+        };
+      }
     }
   }
   return null;
@@ -595,13 +1063,11 @@ function showParamOverlay(comp: OfaComponent, screenX: number, screenY: number):
     box-shadow: 0 4px 12px rgba(0,0,0,0.5);
   `;
 
-  // Header
   const header = document.createElement("div");
   header.style.cssText = "font-weight: bold; margin-bottom: 6px; padding-bottom: 4px; border-bottom: 1px solid rgba(255,255,255,0.1);";
   header.textContent = `${comp.cell} [${comp.id.substring(0, 6)}]`;
   overlay.appendChild(header);
 
-  // Parameter inputs
   const inputs: { key: string; input: HTMLInputElement }[] = [];
   for (const [key, value] of Object.entries(allParams)) {
     const row = document.createElement("div");
@@ -628,7 +1094,6 @@ function showParamOverlay(comp: OfaComponent, screenX: number, screenY: number):
     inputs.push({ key, input });
   }
 
-  // Buttons
   const btnRow = document.createElement("div");
   btnRow.style.cssText = "display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px; padding-top: 4px; border-top: 1px solid rgba(255,255,255,0.1);";
 
@@ -640,14 +1105,11 @@ function showParamOverlay(comp: OfaComponent, screenX: number, screenY: number):
     border: none; border-radius: 2px; padding: 3px 12px; cursor: pointer; font-size: 11px;
   `;
   applyBtn.addEventListener("click", () => {
-    // Re-find component in current documentData (it may have been replaced by an update)
     const liveComp = documentData?.components.find((c) => c.id === comp.id);
     if (!liveComp || !documentData) { closeParamOverlay(); return; }
 
-    // Update component params
     for (const { key, input } of inputs) {
       const raw = input.value.trim();
-      // Try to parse as number, then boolean, then keep as string
       const num = Number(raw);
       if (!isNaN(num) && raw !== "") {
         liveComp.params[key] = num;
@@ -660,7 +1122,6 @@ function showParamOverlay(comp: OfaComponent, screenX: number, screenY: number):
       }
     }
     vscode.postMessage({ type: "edit", data: documentData });
-    // Re-query GDSFactory for updated xsize/ysize/ports with new params
     if (!pendingQueries.has(liveComp.id)) {
       pendingQueries.add(liveComp.id);
       componentSizeCache.delete(liveComp.id);
@@ -692,7 +1153,7 @@ function showParamOverlay(comp: OfaComponent, screenX: number, screenY: number):
   `;
   deleteBtn.addEventListener("click", () => {
     if (documentData) {
-      documentData.components = documentData.components.filter((c) => c.id !== comp.id);
+      deleteComponentCascade(comp.id);
       vscode.postMessage({ type: "edit", data: documentData });
     }
     closeParamOverlay();
@@ -703,7 +1164,115 @@ function showParamOverlay(comp: OfaComponent, screenX: number, screenY: number):
   btnRow.appendChild(applyBtn);
   overlay.appendChild(btnRow);
 
-  // Keep overlay within viewport
+  document.body.appendChild(overlay);
+  const rect = overlay.getBoundingClientRect();
+  if (rect.right > window.innerWidth) {
+    overlay.style.left = `${window.innerWidth - rect.width - 8}px`;
+  }
+  if (rect.bottom > window.innerHeight) {
+    overlay.style.top = `${window.innerHeight - rect.height - 8}px`;
+  }
+
+  paramOverlay = overlay;
+}
+
+// --- Wire editing overlay ---
+
+function showWireOverlay(wire: OfaWire, screenX: number, screenY: number): void {
+  closeParamOverlay();
+
+  const overlay = document.createElement("div");
+  overlay.style.cssText = `
+    position: fixed; left: ${screenX}px; top: ${screenY}px;
+    background: var(--vscode-editor-background, #1e1e1e);
+    border: 1px solid var(--vscode-focusBorder, #007fd4);
+    border-radius: 4px; padding: 8px; min-width: 180px;
+    z-index: 1000; font-family: var(--vscode-font-family, sans-serif);
+    font-size: 12px; color: var(--vscode-editor-foreground, #ccc);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+  `;
+
+  const header = document.createElement("div");
+  header.style.cssText = "font-weight: bold; margin-bottom: 6px; padding-bottom: 4px; border-bottom: 1px solid rgba(255,255,255,0.1);";
+  header.textContent = `Wire [${wire.id.substring(0, 6)}]`;
+  overlay.appendChild(header);
+
+  // Layer selector
+  const layerRow = document.createElement("div");
+  layerRow.style.cssText = "display: flex; align-items: center; margin: 3px 0; gap: 6px;";
+  const layerLabel = document.createElement("label");
+  layerLabel.style.cssText = "flex: 0 0 50px; text-align: right; opacity: 0.7;";
+  layerLabel.textContent = "Layer";
+  layerRow.appendChild(layerLabel);
+  const layerSel = document.createElement("select");
+  layerSel.style.cssText = `flex: 1; background: var(--vscode-dropdown-background, #3c3c3c); color: var(--vscode-dropdown-foreground, #ccc); border: 1px solid var(--vscode-dropdown-border, #555); border-radius: 2px; padding: 2px 4px; font-size: 11px;`;
+  for (const name of Object.keys(LAYER_COLORS)) {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name;
+    if (name === wire.layer) { opt.selected = true; }
+    layerSel.appendChild(opt);
+  }
+  layerRow.appendChild(layerSel);
+  overlay.appendChild(layerRow);
+
+  // Width input
+  const widthRow = document.createElement("div");
+  widthRow.style.cssText = "display: flex; align-items: center; margin: 3px 0; gap: 6px;";
+  const widthLabel = document.createElement("label");
+  widthLabel.style.cssText = "flex: 0 0 50px; text-align: right; opacity: 0.7;";
+  widthLabel.textContent = "Width";
+  widthRow.appendChild(widthLabel);
+  const widthInput = document.createElement("input");
+  widthInput.type = "number";
+  widthInput.min = "0.01";
+  widthInput.step = "0.01";
+  widthInput.value = String(wire.width);
+  widthInput.style.cssText = `flex: 1; background: var(--vscode-input-background, #3c3c3c); color: var(--vscode-input-foreground, #ccc); border: 1px solid var(--vscode-input-border, #555); border-radius: 2px; padding: 2px 4px; font-size: 11px; font-family: var(--vscode-editor-font-family, monospace);`;
+  widthRow.appendChild(widthInput);
+  overlay.appendChild(widthRow);
+
+  // Buttons
+  const btnRow = document.createElement("div");
+  btnRow.style.cssText = "display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px; padding-top: 4px; border-top: 1px solid rgba(255,255,255,0.1);";
+
+  const applyBtn = document.createElement("button");
+  applyBtn.textContent = "Apply";
+  applyBtn.style.cssText = `background: var(--vscode-button-background, #007fd4); color: var(--vscode-button-foreground, #fff); border: none; border-radius: 2px; padding: 3px 12px; cursor: pointer; font-size: 11px;`;
+  applyBtn.addEventListener("click", () => {
+    const liveWire = documentData?.wires.find((w) => w.id === wire.id);
+    if (!liveWire || !documentData) { closeParamOverlay(); return; }
+    liveWire.layer = layerSel.value;
+    liveWire.width = Math.max(0.01, Number(widthInput.value) || 0.1);
+    // Update connected junction styles
+    if (liveWire.startType === "junction") { autoUpdateJunctionStyle(liveWire.startId); }
+    if (liveWire.endType === "junction") { autoUpdateJunctionStyle(liveWire.endId); }
+    vscode.postMessage({ type: "edit", data: documentData });
+    closeParamOverlay();
+  });
+
+  const cancelBtn = document.createElement("button");
+  cancelBtn.textContent = "Cancel";
+  cancelBtn.style.cssText = `background: var(--vscode-button-secondaryBackground, #3c3c3c); color: var(--vscode-button-secondaryForeground, #ccc); border: none; border-radius: 2px; padding: 3px 12px; cursor: pointer; font-size: 11px;`;
+  cancelBtn.addEventListener("click", closeParamOverlay);
+
+  const deleteBtn = document.createElement("button");
+  deleteBtn.textContent = "Delete";
+  deleteBtn.style.cssText = `background: #a02020; color: #fff; border: none; border-radius: 2px; padding: 3px 12px; cursor: pointer; font-size: 11px; margin-right: auto;`;
+  deleteBtn.addEventListener("click", () => {
+    if (documentData) {
+      deleteWireCascade(wire.id);
+      clearSelection();
+      vscode.postMessage({ type: "edit", data: documentData });
+    }
+    closeParamOverlay();
+  });
+
+  btnRow.appendChild(deleteBtn);
+  btnRow.appendChild(cancelBtn);
+  btnRow.appendChild(applyBtn);
+  overlay.appendChild(btnRow);
+
   document.body.appendChild(overlay);
   const rect = overlay.getBoundingClientRect();
   if (rect.right > window.innerWidth) {
@@ -720,7 +1289,23 @@ function showParamOverlay(comp: OfaComponent, screenX: number, screenY: number):
 
 canvas.addEventListener("contextmenu", (e) => {
   e.preventDefault();
+
+  // In wire mode, right-click cancels drawing
+  if (wireDrawing) {
+    wireDrawing = false;
+    wireStartAnchor = null;
+    wirePreviewEnd = null;
+    return;
+  }
+
   const world = screenToWorld(e.clientX, e.clientY);
+
+  const wire = hitTestWire(world.x, world.y);
+  if (wire) {
+    showWireOverlay(wire, e.clientX, e.clientY);
+    return;
+  }
+
   const comp = hitTestComponent(world.x, world.y);
   if (comp) {
     showParamOverlay(comp, e.clientX, e.clientY);
@@ -751,29 +1336,67 @@ document.addEventListener("keydown", (e) => {
   const tag = (e.target as HTMLElement)?.tagName;
   if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") { return; }
 
-  const comp = getSelectedComponent();
-  if (!comp) { return; }
+  // Escape: cancel wire drawing or exit wire mode
+  if (e.key === "Escape") {
+    if (wireDrawing) {
+      wireDrawing = false;
+      wireStartAnchor = null;
+      wirePreviewEnd = null;
+      e.preventDefault();
+      return;
+    }
+    if (wireMode) {
+      wireMode = false;
+      btnWireMode.classList.remove("active");
+      canvas.style.cursor = "default";
+      e.preventDefault();
+      return;
+    }
+  }
 
-  if (e.key === "r" || e.key === "R") {
-    comp.rotation = (comp.rotation + 90) % 360;
-    vscode.postMessage({ type: "edit", data: documentData });
+  // W: toggle wire mode
+  if (e.key === "w" || e.key === "W") {
+    btnWireMode.click();
     e.preventDefault();
+    return;
   }
-  if (e.key === "h" || e.key === "H") {
-    comp.flipH = !(comp.flipH ?? false);
-    vscode.postMessage({ type: "edit", data: documentData });
-    e.preventDefault();
+
+  // Component shortcuts (only when component is selected)
+  const comp = getSelectedComponent();
+  if (comp) {
+    if (e.key === "r" || e.key === "R") {
+      comp.rotation = (comp.rotation + 90) % 360;
+      vscode.postMessage({ type: "edit", data: documentData });
+      e.preventDefault();
+    }
+    if (e.key === "h" || e.key === "H") {
+      comp.flipH = !(comp.flipH ?? false);
+      vscode.postMessage({ type: "edit", data: documentData });
+      e.preventDefault();
+    }
+    if (e.key === "v" || e.key === "V") {
+      comp.flipV = !(comp.flipV ?? false);
+      vscode.postMessage({ type: "edit", data: documentData });
+      e.preventDefault();
+    }
   }
-  if (e.key === "v" || e.key === "V") {
-    comp.flipV = !(comp.flipV ?? false);
-    vscode.postMessage({ type: "edit", data: documentData });
-    e.preventDefault();
-  }
+
+  // Delete: works for component, junction, or wire
   if (e.key === "Delete" || e.key === "Backspace") {
-    if (documentData) {
-      documentData.components = documentData.components.filter((c) => c.id !== comp.id);
-      selectedComponentId = null;
-      updateToolbarSelection();
+    if (!documentData) { return; }
+    if (selection.type === "component" && selection.id) {
+      deleteComponentCascade(selection.id);
+      clearSelection();
+      vscode.postMessage({ type: "edit", data: documentData });
+      e.preventDefault();
+    } else if (selection.type === "junction" && selection.id) {
+      deleteJunctionCascade(selection.id);
+      clearSelection();
+      vscode.postMessage({ type: "edit", data: documentData });
+      e.preventDefault();
+    } else if (selection.type === "wire" && selection.id) {
+      deleteWireCascade(selection.id);
+      clearSelection();
       vscode.postMessage({ type: "edit", data: documentData });
       e.preventDefault();
     }
@@ -784,7 +1407,7 @@ document.addEventListener("keyup", (e) => {
   if (e.code === "Space") {
     spaceHeld = false;
     isPanning = false;
-    canvas.style.cursor = "default";
+    canvas.style.cursor = wireMode ? "crosshair" : "default";
   }
 });
 
@@ -804,14 +1427,102 @@ canvas.addEventListener("mousedown", (e) => {
     canvas.style.cursor = "grabbing";
     return;
   }
-  // Left click — select / drag / place
+  // Left click
   if (e.button === 0 && !spaceHeld) {
     const world = screenToWorld(e.clientX, e.clientY);
 
-    // 1. Check if clicking on any device → select + start drag
+    // --- WIRE MODE ---
+    if (wireMode && documentData) {
+      if (!wireDrawing) {
+        // Start wire from port, junction, or empty space
+        const portHit = hitTestPort(world.x, world.y);
+        if (portHit) {
+          wireStartAnchor = portHit;
+          wireDrawing = true;
+          return;
+        }
+        const jHit = hitTestJunction(world.x, world.y);
+        if (jHit) {
+          wireStartAnchor = { type: "junction", id: jHit.id, x: jHit.x, y: jHit.y };
+          wireDrawing = true;
+          return;
+        }
+        // Empty space: create junction and start from it
+        const snapped = { x: Math.round(world.x * 100) / 100, y: Math.round(world.y * 100) / 100 };
+        const newJ: OfaJunction = { id: generateId(), x: snapped.x, y: snapped.y, style: "d2" };
+        documentData.junctions.push(newJ);
+        wireStartAnchor = { type: "junction", id: newJ.id, x: snapped.x, y: snapped.y };
+        wireDrawing = true;
+        vscode.postMessage({ type: "edit", data: documentData });
+        return;
+      } else {
+        // Complete wire
+        const snapped = snapWireEnd(wireStartAnchor!.x, wireStartAnchor!.y, world.x, world.y);
+
+        // Try to end on port or junction
+        let endAnchor: WireAnchor | null = hitTestPort(snapped.x, snapped.y);
+        if (!endAnchor) {
+          const jHit = hitTestJunction(snapped.x, snapped.y);
+          if (jHit) {
+            endAnchor = { type: "junction", id: jHit.id, x: jHit.x, y: jHit.y };
+          }
+        }
+
+        if (!endAnchor) {
+          // Create junction at snapped position
+          const newJ: OfaJunction = { id: generateId(), x: snapped.x, y: snapped.y, style: "d2" };
+          documentData.junctions.push(newJ);
+          endAnchor = { type: "junction", id: newJ.id, x: snapped.x, y: snapped.y };
+        }
+
+        // Don't create zero-length wires
+        if (wireStartAnchor!.id === endAnchor.id && wireStartAnchor!.type === endAnchor.type) {
+          return;
+        }
+
+        const newWire: OfaWire = {
+          id: generateId(),
+          layer: wireLayerSelect.value,
+          width: 0.1,
+          startId: wireStartAnchor!.id,
+          startType: wireStartAnchor!.type,
+          startComponentId: wireStartAnchor!.componentId,
+          endId: endAnchor.id,
+          endType: endAnchor.type,
+          endComponentId: endAnchor.componentId,
+        };
+        documentData.wires.push(newWire);
+
+        // Auto-update junction styles
+        if (wireStartAnchor!.type === "junction") { autoUpdateJunctionStyle(wireStartAnchor!.id); }
+        if (endAnchor.type === "junction") { autoUpdateJunctionStyle(endAnchor.id); }
+
+        vscode.postMessage({ type: "edit", data: documentData });
+
+        // Chain: start next wire from end anchor
+        wireStartAnchor = endAnchor;
+        return;
+      }
+    }
+
+    // --- NORMAL MODE ---
+
+    // 1. Hit test junction (small, high priority)
+    const jHit = hitTestJunction(world.x, world.y);
+    if (jHit) {
+      selection = { type: "junction", id: jHit.id };
+      isDragging = true;
+      dragStartWorld = { x: world.x, y: world.y };
+      dragOrigPos = { x: jHit.x, y: jHit.y };
+      canvas.style.cursor = "move";
+      updateToolbarSelection();
+      return;
+    }
+
+    // 2. Hit test component
     const hitComp = hitTestComponent(world.x, world.y);
     if (hitComp) {
-      selectedComponentId = hitComp.id;
+      selection = { type: "component", id: hitComp.id };
       isDragging = true;
       dragStartWorld = { x: world.x, y: world.y };
       dragOrigPos = { x: hitComp.x, y: hitComp.y };
@@ -820,7 +1531,15 @@ canvas.addEventListener("mousedown", (e) => {
       return;
     }
 
-    // 3. Empty space + dropdown selected → place new component
+    // 3. Hit test wire
+    const wHit = hitTestWire(world.x, world.y);
+    if (wHit) {
+      selection = { type: "wire", id: wHit.id };
+      updateToolbarSelection();
+      return;
+    }
+
+    // 4. Empty space + dropdown selected → place new component
     const selectedCell = componentSelect.value;
     if (selectedCell && documentData) {
       const info = getCellInfo(selectedCell);
@@ -845,13 +1564,12 @@ canvas.addEventListener("mousedown", (e) => {
         componentSizeCache.set(newComp.id, newComp._cache);
       }
       documentData.components.push(newComp);
-      selectedComponentId = newComp.id;
+      selection = { type: "component", id: newComp.id };
       vscode.postMessage({ type: "edit", data: documentData });
       updateToolbarSelection();
     } else {
-      // 4. Empty space, no dropdown → deselect
-      selectedComponentId = null;
-      updateToolbarSelection();
+      // 5. Empty space, no dropdown → deselect
+      clearSelection();
     }
   }
 });
@@ -865,13 +1583,29 @@ canvas.addEventListener("mousemove", (e) => {
 
   const world = screenToWorld(e.clientX, e.clientY);
 
+  // Wire preview
+  if (wireDrawing && wireStartAnchor) {
+    wirePreviewEnd = { x: world.x, y: world.y };
+    return;
+  }
+
   if (isDragging) {
-    const comp = getSelectedComponent();
-    if (comp) {
-      const dx = world.x - dragStartWorld.x;
-      const dy = world.y - dragStartWorld.y;
-      comp.x = Math.round((dragOrigPos.x + dx) * 100) / 100;
-      comp.y = Math.round((dragOrigPos.y + dy) * 100) / 100;
+    if (selection.type === "component") {
+      const comp = getSelectedComponent();
+      if (comp) {
+        const dx = world.x - dragStartWorld.x;
+        const dy = world.y - dragStartWorld.y;
+        comp.x = Math.round((dragOrigPos.x + dx) * 100) / 100;
+        comp.y = Math.round((dragOrigPos.y + dy) * 100) / 100;
+      }
+    } else if (selection.type === "junction") {
+      const j = getSelectedJunction();
+      if (j) {
+        const dx = world.x - dragStartWorld.x;
+        const dy = world.y - dragStartWorld.y;
+        j.x = Math.round((dragOrigPos.x + dx) * 100) / 100;
+        j.y = Math.round((dragOrigPos.y + dy) * 100) / 100;
+      }
     }
     return;
   }
@@ -882,15 +1616,15 @@ canvas.addEventListener("mousemove", (e) => {
 canvas.addEventListener("mouseup", (e) => {
   if (middlePanning && e.button === 1) {
     middlePanning = false;
-    canvas.style.cursor = "default";
+    canvas.style.cursor = wireMode ? "crosshair" : "default";
   }
   if (isPanning && e.button === 0) {
     isPanning = false;
-    canvas.style.cursor = spaceHeld ? "grab" : "default";
+    canvas.style.cursor = spaceHeld ? "grab" : (wireMode ? "crosshair" : "default");
   }
   if (isDragging && e.button === 0) {
     isDragging = false;
-    canvas.style.cursor = "default";
+    canvas.style.cursor = wireMode ? "crosshair" : "default";
     if (documentData) {
       vscode.postMessage({ type: "edit", data: documentData });
     }
@@ -942,6 +1676,9 @@ window.addEventListener("message", (e) => {
   switch (msg.type) {
     case "update":
       documentData = msg.data as DocumentData;
+      // Ensure junctions/wires arrays exist (for legacy .ofa files)
+      if (documentData && !documentData.junctions) { documentData.junctions = []; }
+      if (documentData && !documentData.wires) { documentData.wires = []; }
       // Seed size cache from persisted _cache for instant rendering on reload
       if (documentData) {
         for (const comp of documentData.components) {
@@ -950,12 +1687,15 @@ window.addEventListener("message", (e) => {
           }
         }
       }
-      if (selectedComponentId) {
-        const stillExists = documentData.components.some((c) => c.id === selectedComponentId);
-        if (!stillExists) {
-          selectedComponentId = null;
-          updateToolbarSelection();
-        }
+      if (selection.type === "component" && selection.id) {
+        const stillExists = documentData.components.some((c) => c.id === selection.id);
+        if (!stillExists) { clearSelection(); }
+      } else if (selection.type === "junction" && selection.id) {
+        const stillExists = documentData.junctions.some((j) => j.id === selection.id);
+        if (!stillExists) { clearSelection(); }
+      } else if (selection.type === "wire" && selection.id) {
+        const stillExists = documentData.wires.some((w) => w.id === selection.id);
+        if (!stillExists) { clearSelection(); }
       }
       // Clean stale cache entries for deleted components
       if (documentData) {
@@ -987,9 +1727,10 @@ window.addEventListener("message", (e) => {
       break;
     case "pdkData": {
       pdkCells = (msg.cells || []) as PdkCellInfo[];
-      const connectivity = (msg.connectivity || []) as { name: string }[];
       populateSelect(componentSelect, pdkCells, "-- Select Device --");
-      populateSelect(junctionSelect, connectivity, "-- Select Junction --");
+      if (msg.layers && Array.isArray(msg.layers)) {
+        applyPdkLayers(msg.layers);
+      }
       break;
     }
     case "componentInfoResult": {
@@ -999,7 +1740,6 @@ window.addEventListener("message", (e) => {
       } else {
         const cached = { xsize: msg.xsize, ysize: msg.ysize, ports: msg.ports };
         componentSizeCache.set(msg.componentId, cached);
-        // Persist cache into .ofa document for instant reload
         if (documentData) {
           const comp = documentData.components.find((c) => c.id === msg.componentId);
           if (comp) {

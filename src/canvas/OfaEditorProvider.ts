@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
-import { PdkCellInfo, PdkConnectivityInfo } from "../types.js";
-import { readConfig, getPdkCells, getPdkConnectivity, getComponentInfo, exportGds } from "../pdk/pdkQuery.js";
+import { PdkCellInfo, PdkConnectivityInfo, PdkLayerInfo } from "../types.js";
+import { readConfig, getPdkCells, getPdkConnectivity, getPdkLayers, getComponentInfo, exportGds } from "../pdk/pdkQuery.js";
 import { GdsViewerPanel } from "../GdsViewerPanel.js";
 
 export class OfaEditorProvider implements vscode.CustomTextEditorProvider {
@@ -8,6 +8,7 @@ export class OfaEditorProvider implements vscode.CustomTextEditorProvider {
 
   private _pdkCellsCache: PdkCellInfo[] | null = null;
   private _pdkConnectivityCache: PdkConnectivityInfo[] | null = null;
+  private _pdkLayersCache: PdkLayerInfo[] | null = null;
 
   constructor(private readonly _context: vscode.ExtensionContext) {}
 
@@ -154,10 +155,19 @@ export class OfaEditorProvider implements vscode.CustomTextEditorProvider {
       if (!this._pdkConnectivityCache) {
         this._pdkConnectivityCache = await getPdkConnectivity(root, config);
       }
+      // Layers are non-critical — fallback colors exist in canvas
+      if (!this._pdkLayersCache) {
+        try {
+          this._pdkLayersCache = await getPdkLayers(root, config);
+        } catch (layerErr) {
+          console.warn("OFA: Layer query failed, using fallbacks", layerErr);
+        }
+      }
       webview.postMessage({
         type: "pdkData",
         cells: this._pdkCellsCache,
         connectivity: this._pdkConnectivityCache,
+        layers: this._pdkLayersCache ?? [],
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -189,8 +199,9 @@ export class OfaEditorProvider implements vscode.CustomTextEditorProvider {
       </select>
     </div>
     <div class="toolbar-group">
-      <label for="junctionSelect">Junctions:</label>
-      <select id="junctionSelect">
+      <button id="btnWireMode" class="toolbar-btn" title="Wire mode (w)" style="font-size: 11px; width: auto; padding: 0 8px;">Wire</button>
+      <label for="wireLayerSelect">Layer:</label>
+      <select id="wireLayerSelect">
         <option value="">Loading...</option>
       </select>
     </div>

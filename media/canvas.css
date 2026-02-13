@@ -77,6 +77,12 @@ html, body {
   background: var(--vscode-toolbar-activeBackground, rgba(255, 255, 255, 0.18));
 }
 
+.toolbar-btn.active {
+  background: var(--vscode-button-background, #007fd4);
+  color: var(--vscode-button-foreground, #fff);
+  border-color: var(--vscode-focusBorder, #007fd4);
+}
+
 .canvas-container {
   flex: 1;
   position: relative;

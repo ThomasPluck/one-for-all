@@ -38,11 +38,32 @@ export interface OfaComponent {
   };
 }
 
+export type JunctionStyle = "h2" | "v2" | "d2" | "x4" | "hp" | "vp";
+
+export interface OfaJunction {
+  id: string;
+  x: number;
+  y: number;
+  style: JunctionStyle;
+}
+
+export interface OfaWire {
+  id: string;
+  layer: string;
+  width: number;
+  startId: string;
+  startType: "port" | "junction";
+  startComponentId?: string;
+  endId: string;
+  endType: "port" | "junction";
+  endComponentId?: string;
+}
+
 export interface OfaDocument {
   version: number;
   components: OfaComponent[];
-  junctions: unknown[];
-  wires: unknown[];
+  junctions: OfaJunction[];
+  wires: OfaWire[];
 }
 
 // --- Enriched PDK types ---
@@ -65,6 +86,12 @@ export interface PdkCellInfo {
 
 export interface PdkConnectivityInfo {
   name: string;
+}
+
+export interface PdkLayerInfo {
+  name: string;
+  gds_layer: [number, number];
+  color: string;
 }
 
 // --- Supported PDKs ---

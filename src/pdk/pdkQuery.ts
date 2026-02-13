@@ -1,7 +1,7 @@
 import * as cp from "child_process";
 import * as path from "path";
 import * as fs from "fs";
-import { OfaConfig, PdkCellInfo, PdkConnectivityInfo, PdkPortInfo, SUPPORTED_PDKS } from "../types.js";
+import { OfaConfig, PdkCellInfo, PdkConnectivityInfo, PdkLayerInfo, PdkPortInfo, SUPPORTED_PDKS } from "../types.js";
 
 export interface ComponentQueryResult {
   xsize: number;
@@ -58,14 +58,33 @@ export async function getPdkCells(
   const pdk = config.pythonImport;
 
   // Bulk query: for each pcell, get function params (defaults) and ports from default instantiation
+  // port.layer is a kfactory integer index — convert to GDS (layer, datatype) via get_info()
   const script = `
 import json, inspect, warnings
 warnings.filterwarnings("ignore")
-from ${pdk} import cells
+from ${pdk} import cells, PDK
 from gdsfactory.get_factories import get_cells
 import gdsfactory as gf
+import kfactory as kf
 
+PDK.activate()
 factories = get_cells(cells)
+
+def port_gds_layer(port):
+    """Convert port.layer (kfactory int index) to [gds_layer, gds_datatype]."""
+    if not hasattr(port, "layer") or port.layer is None:
+        return None
+    raw = port.layer
+    if isinstance(raw, int):
+        try:
+            li = kf.kcl.layout.get_info(raw)
+            return [li.layer, li.datatype]
+        except Exception:
+            return [raw, 0]
+    if hasattr(raw, "__iter__"):
+        return list(raw)
+    return [raw, 0]
+
 result = []
 for name, func in factories.items():
     sig = inspect.signature(func)
@@ -91,7 +110,7 @@ for name, func in factories.items():
                 "name": port.name,
                 "x": float(port.center[0]) - xmin,
                 "y": float(port.center[1]) - ymin,
-                "layer": (list(port.layer) if hasattr(port.layer, "__iter__") else [port.layer, 0]) if hasattr(port, "layer") else None,
+                "layer": port_gds_layer(port),
                 "width": float(port.width)
             })
     except Exception:
@@ -120,6 +139,78 @@ export async function getPdkConnectivity(
   return names.map((name) => ({ name }));
 }
 
+// Distinct, high-contrast palette for layer coloring
+const LAYER_PALETTE = [
+  "#4caf50", "#2196f3", "#ff9800", "#9c27b0", "#f44336",
+  "#00bcd4", "#ffeb3b", "#e91e63", "#8bc34a", "#ff5722",
+  "#3f51b5", "#009688", "#cddc39", "#795548", "#607d8b",
+];
+
+export async function getPdkLayers(
+  root: string,
+  config: OfaConfig
+): Promise<PdkLayerInfo[]> {
+  const py = getPythonPath(root);
+  const pdk = config.pythonImport;
+
+  // Query LAYER_STACK — kfactory stores layers as integer indices, not GDS tuples.
+  // Use kf.kcl.layout.get_info() to convert kfactory index -> GDS (layer, datatype).
+  // Display names come from the LAYER enum "drawing" members (e.g. "Metal1drawing" -> "Metal1").
+  const script = `
+import json, warnings
+warnings.filterwarnings("ignore")
+from ${pdk} import PDK
+PDK.activate()
+import kfactory as kf
+
+# Build display-name lookup from LAYER enum: (8,0) -> "Metal1"
+display_map = {}
+try:
+    layer_enum = PDK.layers
+    if layer_enum:
+        for m in layer_enum:
+            if not m.name.endswith('drawing'):
+                continue
+            try:
+                li = kf.kcl.layout.get_info(m.value)
+                display_map[(li.layer, li.datatype)] = m.name[:-7]
+            except Exception:
+                pass
+except Exception:
+    pass
+
+result = []
+ls = PDK.layer_stack
+if ls and hasattr(ls, 'layers'):
+    for name, info in ls.layers.items():
+        if name == 'substrate':
+            continue
+        layer_obj = getattr(info, 'layer', None)
+        if layer_obj is None:
+            continue
+        raw = getattr(layer_obj, 'layer', layer_obj)
+        idx = raw.value if hasattr(raw, 'value') else raw
+        if not isinstance(idx, int):
+            continue
+        try:
+            li = kf.kcl.layout.get_info(idx)
+            gds = [li.layer, li.datatype]
+        except Exception:
+            continue
+        display = display_map.get(tuple(gds), name.capitalize())
+        result.append({"name": display, "gds_layer": gds})
+print(json.dumps(result))
+`.trim();
+
+  const output = await execPython(py, script, root);
+  const raw: { name: string; gds_layer: [number, number] }[] = JSON.parse(output);
+
+  return raw.map((layer, i) => ({
+    ...layer,
+    color: LAYER_PALETTE[i % LAYER_PALETTE.length],
+  }));
+}
+
 export async function getComponentInfo(
   root: string,
   config: OfaConfig,
@@ -133,13 +224,28 @@ export async function getComponentInfo(
   const script = `
 import json, inspect, warnings, sys
 warnings.filterwarnings("ignore")
-from ${pdk} import cells
+from ${pdk} import cells, PDK
 from gdsfactory.get_factories import get_cells
 import gdsfactory as gf
+import kfactory as kf
 
-from ${pdk} import PDK
 PDK.activate()
 factories = get_cells(cells)
+
+def port_gds_layer(port):
+    if not hasattr(port, "layer") or port.layer is None:
+        return None
+    raw = port.layer
+    if isinstance(raw, int):
+        try:
+            li = kf.kcl.layout.get_info(raw)
+            return [li.layer, li.datatype]
+        except Exception:
+            return [raw, 0]
+    if hasattr(raw, "__iter__"):
+        return list(raw)
+    return [raw, 0]
+
 func = factories[${JSON.stringify(cellName)}]
 params = json.loads(sys.argv[1] if len(sys.argv) > 1 else '{}')
 sig = inspect.signature(func)
@@ -153,7 +259,7 @@ for port in c.ports:
         "name": port.name,
         "x": float(port.center[0]) - xmin,
         "y": float(port.center[1]) - ymin,
-        "layer": (list(port.layer) if hasattr(port.layer, "__iter__") else [port.layer, 0]) if hasattr(port, "layer") else None,
+        "layer": port_gds_layer(port),
         "width": float(port.width)
     })
 print(json.dumps({"xsize": float(c.xsize), "ysize": float(c.ysize), "ports": ports}))

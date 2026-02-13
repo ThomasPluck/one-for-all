@@ -11,3 +11,15 @@ Now that we're able to place devices correctly and we have corrected the canvas 
 - [x] rely instead on c.xsize and c.ysize exposed by GDSFactory components for the size of objects, we should still be able to select move, rotate and flip components
 
 - [x] there should be a pop-up menu where I can edit the function arguments of the pcells to get new cells and continue to move them around.
+
+- [x] persist xsize/ysize/ports as `_cache` in the .ofa document for instant rendering on reload (no Python re-query delay)
+
+- [x] port labels use layer color coding (matching the legend) instead of flat white
+
+- [x] port coordinates offset by c.xmin/c.ymin so they align with the top-left-origin bounding box
+
+- [x] newly placed components get `_cache` populated immediately from PDK cell defaults
+
+- [x] Export GDS button in toolbar — Python/GDSFactory script instantiates each component with params, applies transforms, writes .gds next to .ofa
+
+- [x] GDSJam embedded viewer — local HTTP server serves GDS with CORS headers, iframe panel opens beside editor
