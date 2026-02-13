@@ -49,6 +49,10 @@
       {
         "command": "ofa.newSchematic",
         "title": "OFA: New Schematic"
+      },
+      {
+        "command": "ofa.exportGds",
+        "title": "OFA: Export GDS"
       }
     ]
   },

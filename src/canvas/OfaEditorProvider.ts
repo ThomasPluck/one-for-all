@@ -1,14 +1,13 @@
 import * as vscode from "vscode";
-import * as fs from "fs";
-import * as path from "path";
-import { readConfig } from "../pdk/pdkQuery.js";
-import { getPdkCells, getPdkConnectivity } from "../pdk/pdkQuery.js";
+import { PdkCellInfo, PdkConnectivityInfo } from "../types.js";
+import { readConfig, getPdkCells, getPdkConnectivity, getComponentInfo, exportGds } from "../pdk/pdkQuery.js";
+import { GdsViewerPanel } from "../GdsViewerPanel.js";
 
 export class OfaEditorProvider implements vscode.CustomTextEditorProvider {
   public static readonly viewType = "ofa.schematicEditor";
 
-  private _pdkCellsCache: { name: string }[] | null = null;
-  private _pdkConnectivityCache: { name: string }[] | null = null;
+  private _pdkCellsCache: PdkCellInfo[] | null = null;
+  private _pdkConnectivityCache: PdkConnectivityInfo[] | null = null;
 
   constructor(private readonly _context: vscode.ExtensionContext) {}
 
@@ -70,6 +69,60 @@ export class OfaEditorProvider implements vscode.CustomTextEditorProvider {
           );
           await vscode.workspace.applyEdit(edit);
           isApplyingEdit = false;
+          break;
+        }
+        case "queryComponentInfo": {
+          const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+          if (!root) {
+            webviewPanel.webview.postMessage({ type: "componentInfoResult", componentId: msg.componentId, error: "No workspace folder" });
+            break;
+          }
+          const config = readConfig(root);
+          if (!config) {
+            webviewPanel.webview.postMessage({ type: "componentInfoResult", componentId: msg.componentId, error: "No OFA config" });
+            break;
+          }
+          try {
+            const result = await getComponentInfo(root, config, msg.cellName, msg.params);
+            webviewPanel.webview.postMessage({
+              type: "componentInfoResult",
+              componentId: msg.componentId,
+              xsize: result.xsize,
+              ysize: result.ysize,
+              ports: result.ports,
+            });
+          } catch (err: unknown) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            webviewPanel.webview.postMessage({
+              type: "componentInfoResult",
+              componentId: msg.componentId,
+              error: errMsg,
+            });
+          }
+          break;
+        }
+        case "exportGds": {
+          const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+          if (!root) {
+            webviewPanel.webview.postMessage({ type: "exportGdsResult", error: "No workspace folder" });
+            break;
+          }
+          const config = readConfig(root);
+          if (!config) {
+            webviewPanel.webview.postMessage({ type: "exportGdsResult", error: "No OFA config" });
+            break;
+          }
+          try {
+            await document.save();
+            const gdsPath = await exportGds(root, config, document.uri.fsPath);
+            webviewPanel.webview.postMessage({ type: "exportGdsResult", path: gdsPath });
+            vscode.window.showInformationMessage(`GDS exported: ${gdsPath}`);
+            GdsViewerPanel.show(this._context, gdsPath);
+          } catch (err: unknown) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            webviewPanel.webview.postMessage({ type: "exportGdsResult", error: errMsg });
+            vscode.window.showErrorMessage(`GDS export failed: ${errMsg}`);
+          }
           break;
         }
       }
@@ -140,6 +193,15 @@ export class OfaEditorProvider implements vscode.CustomTextEditorProvider {
       <select id="junctionSelect">
         <option value="">Loading...</option>
       </select>
+    </div>
+    <div class="toolbar-group toolbar-actions" id="selectionToolbar" style="display: none;">
+      <span class="toolbar-separator"></span>
+      <button id="btnRotate" class="toolbar-btn" title="Rotate 90° (r)">&#x21BB;</button>
+      <button id="btnFlipH" class="toolbar-btn" title="Flip horizontal (h)">&#x2194;</button>
+      <button id="btnFlipV" class="toolbar-btn" title="Flip vertical (v)">&#x2195;</button>
+    </div>
+    <div class="toolbar-group" style="margin-left: auto;">
+      <button id="btnExportGds" class="toolbar-btn" title="Export GDS" style="font-size: 11px; width: auto; padding: 0 8px;">Export GDS</button>
     </div>
   </div>
   <div class="canvas-container">

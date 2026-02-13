@@ -20,6 +20,55 @@ export interface EnvironmentStatus {
   pdk?: string;
 }
 
+// --- OFA Document types ---
+
+export interface OfaComponent {
+  id: string;
+  cell: string;
+  x: number;
+  y: number;
+  rotation: number;
+  flipH?: boolean;
+  flipV?: boolean;
+  params: Record<string, number | string | boolean>;
+  _cache?: {
+    xsize: number;
+    ysize: number;
+    ports: PdkPortInfo[];
+  };
+}
+
+export interface OfaDocument {
+  version: number;
+  components: OfaComponent[];
+  junctions: unknown[];
+  wires: unknown[];
+}
+
+// --- Enriched PDK types ---
+
+export interface PdkPortInfo {
+  name: string;
+  x: number;
+  y: number;
+  layer: [number, number] | null;
+  width: number;
+}
+
+export interface PdkCellInfo {
+  name: string;
+  params: Record<string, unknown>;
+  ports: PdkPortInfo[];
+  xsize: number;
+  ysize: number;
+}
+
+export interface PdkConnectivityInfo {
+  name: string;
+}
+
+// --- Supported PDKs ---
+
 export const SUPPORTED_PDKS: PdkOption[] = [
   {
     id: "ihp-sg13g2",

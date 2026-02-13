@@ -46,6 +46,37 @@ html, body {
   min-width: 140px;
 }
 
+.toolbar-separator {
+  width: 1px;
+  height: 20px;
+  background: var(--vscode-panel-border, #555);
+  margin: 0 4px;
+}
+
+.toolbar-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--vscode-foreground, #ccc);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.toolbar-btn:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(255, 255, 255, 0.12));
+  border-color: var(--vscode-focusBorder, #007fd4);
+}
+
+.toolbar-btn:active {
+  background: var(--vscode-toolbar-activeBackground, rgba(255, 255, 255, 0.18));
+}
+
 .canvas-container {
   flex: 1;
   position: relative;
