@@ -18,4 +18,33 @@ Please note: junctions are abstracted and the choice of metal is actually made b
 
 - [x] Please ensure that the metalization layers are being determined from the GDSFactory PDK directly instead of being hardcoded into the editor :)
 
-- [ ] we need to start thinking about how the editor will think about junction editing since we need Manhattan routing regardless but it really should be that wires are ONLY horizontal and vertical straight lines with the only possible bend being at a junction (so, the wire breaks into multiple junctions and each wire segment needs to be editable) and we also want the intuitive ui of "drawing onto a wire" to create a new junction. This is further complicated when 4 way junctions become editable but we really should try to make this robust.
+- [x] Create click-on wire for natural circuit design UI, create new junction, split wire, allow manipulation of individual wires..
+
+- [x] Remove the ability to move junctions - wires can only be horizontal or vertical, depending on the choice of orientation ie. vertical wires can only move horizontally etc (with the exception that they are connected to a port or are connected to 4 way junction, in which case they can't move), after the move, we should move terminating junctions and shorten/lengthen the wires either side of them (another important exception to note is a three way junction) this maintains manhattan routing.
+
+- [x] Drawing free hand should create a manhattan S with 2 intermediate junctions, unless the wire snaps to the vertical or horizontal orientation.
+
+- [x] Let's implement 3-way wire manipulation correctly, basically, 3 wires on a four-way connect implies 2 are diametrically opposed - those two have to moved under the assumption that they are the same wire dragging the 3 terminal with them, the remaining one can move and drags the 3-way terminal along the diametrically opposed pair lengthing one and shortening the other.
+
+- [x] Finally for a correct four-way implementation we just repeat the diametrically opposed mechanic but twice in the horizontal and vertical directions to maintain manhattan.
+
+- [x] Fixed saveDocument() infinite recursion — the replace_all from last session accidentally replaced the vscode.postMessage call inside saveDocument() with a recursive saveDocument() call. Restored the correct vscode.postMessage({ type: "edit", data: documentData }) on canvasScript.ts:174.
+
+- [x] Collinear chain propagation — added getCollinearChain() at canvasScript.ts:410 that walks through 2-way pass-through junctions (where both connected wires share the same axis). When dragging a wire:
+
+- [x] Chains are collected from each endpoint before any positions are mutated
+All chain junctions move by the same perpendicular delta as the dragged wire
+3-way/4-way cascade also runs at chain endpoints (not just direct endpoints)
+Junction styles are auto-updated for all affected junctions on mouseup
+
+- [x] Refactor canvasScript.ts monofile.
+
+- [ ] Replace default "S" manhattan routing with "L" manhattan routing
+
+- [ ] Reserve junction orientations - do not allow two wires to connect to the same orientation on a junction.
+
+- [ ] Allow for the deletion of horizontal/vertical junctions, fuse the two wires into one, and choose a material (default if connected to port, port material wins, otherwise, blah, we don't care).
+
+- [ ] If wires are collinear and horizontal all collinear junctions should have the same y coordinate (attached vertical wires must rubber band accordingly) and likewise vertical all collinear must have same x coordinate, etc.
+
+- [ ] Any deviation from verticality or horizontality when joining two terminal junctions/ports must result in an "S" manhattan join.

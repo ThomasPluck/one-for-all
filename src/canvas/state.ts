@@ -1,0 +1,96 @@
+// Global mutable state, constants, DOM refs, save mechanism, and utility helpers
+
+import type { Camera, DocumentData, PdkCellInfo, PdkPortInfo, SelectionState, WireAnchor } from "./types";
+
+// --- Constants ---
+
+export const JUNCTION_RADIUS = 0.15;
+
+// --- VSCode API ---
+
+export const vscode = acquireVsCodeApi();
+
+// --- DOM refs ---
+
+export const canvas = document.getElementById("ofaCanvas") as HTMLCanvasElement;
+export const ctx = canvas.getContext("2d")!;
+export const componentSelect = document.getElementById("componentSelect") as HTMLSelectElement;
+export const selectionToolbar = document.getElementById("selectionToolbar") as HTMLDivElement;
+export const btnRotate = document.getElementById("btnRotate") as HTMLButtonElement;
+export const btnFlipH = document.getElementById("btnFlipH") as HTMLButtonElement;
+export const btnFlipV = document.getElementById("btnFlipV") as HTMLButtonElement;
+export const btnExportGds = document.getElementById("btnExportGds") as HTMLButtonElement;
+export const btnWireMode = document.getElementById("btnWireMode") as HTMLButtonElement;
+export const wireLayerSelect = document.getElementById("wireLayerSelect") as HTMLSelectElement;
+
+// --- Camera (default zoom 200x so sub-micron devices are visible) ---
+
+export const camera: Camera = { x: 0, y: 0, zoom: 200 };
+
+// --- Mutable state (wrapped in object so cross-module mutation works) ---
+
+export const S = {
+  spaceHeld: false,
+  isPanning: false,
+  middlePanning: false,
+  panStart: { x: 0, y: 0 },
+  documentData: null as DocumentData | null,
+  pdkCells: [] as PdkCellInfo[],
+  selection: { type: "none", id: null } as SelectionState,
+  isDragging: false,
+  dragStartWorld: { x: 0, y: 0 },
+  dragOrigPos: { x: 0, y: 0 },
+  wireMode: false,
+  wireDrawing: false,
+  wireStartAnchor: null as WireAnchor | null,
+  wirePreviewEnd: null as { x: number; y: number } | null,
+};
+
+// --- Caches ---
+
+export const componentSizeCache = new Map<string, { xsize: number; ysize: number; ports: PdkPortInfo[] }>();
+export const pendingQueries = new Set<string>();
+
+// --- Debounced save ---
+
+let _saveTimer: ReturnType<typeof setTimeout> | null = null;
+export function saveDocument(): void {
+  if (_saveTimer) { clearTimeout(_saveTimer); }
+  _saveTimer = setTimeout(() => {
+    _saveTimer = null;
+    if (S.documentData) {
+      vscode.postMessage({ type: "edit", data: S.documentData });
+    }
+  }, 300);
+}
+
+// --- Helpers ---
+
+export function generateId(): string {
+  return Math.random().toString(36).substring(2, 10) + Date.now().toString(36);
+}
+
+export function getSelectedComponent() {
+  if (!S.documentData || S.selection.type !== "component" || !S.selection.id) { return null; }
+  return S.documentData.components.find((c) => c.id === S.selection.id) ?? null;
+}
+
+export function getSelectedJunction() {
+  if (!S.documentData || S.selection.type !== "junction" || !S.selection.id) { return null; }
+  return S.documentData.junctions.find((j) => j.id === S.selection.id) ?? null;
+}
+
+export function getSelectedWire() {
+  if (!S.documentData || S.selection.type !== "wire" || !S.selection.id) { return null; }
+  return S.documentData.wires.find((w) => w.id === S.selection.id) ?? null;
+}
+
+export function updateToolbarSelection(): void {
+  const comp = getSelectedComponent();
+  selectionToolbar.style.display = comp ? "flex" : "none";
+}
+
+export function clearSelection(): void {
+  S.selection = { type: "none", id: null };
+  updateToolbarSelection();
+}

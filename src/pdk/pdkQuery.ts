@@ -101,6 +101,9 @@ for name, func in factories.items():
     ysize = 1.0
     try:
         c = gf.get_component(func)
+        c.locked = False
+        c.dmove((-c.xmin, -c.ymin))
+        c.locked = True
         xsize = float(c.xsize)
         ysize = float(c.ysize)
         xmin = float(c.xmin)
@@ -251,6 +254,9 @@ params = json.loads(sys.argv[1] if len(sys.argv) > 1 else '{}')
 sig = inspect.signature(func)
 valid = {k: v for k, v in params.items() if k in sig.parameters}
 c = func(**valid)
+c.locked = False
+c.dmove((-c.xmin, -c.ymin))
+c.locked = True
 xmin = float(c.xmin)
 ymin = float(c.ymin)
 ports = []
@@ -310,6 +316,9 @@ for i, comp in enumerate(ofa["components"]):
         params = comp.get("params", {})
         valid = {k: v for k, v in params.items() if k in sig.parameters}
         cell = gf.get_component(func, **valid)
+        cell.locked = False
+        cell.dmove((-cell.xmin, -cell.ymin))
+        cell.locked = True
         ref = top.add_ref(cell)
         if comp.get("flipH"):
             ref.mirror_x()
@@ -317,7 +326,7 @@ for i, comp in enumerate(ofa["components"]):
             ref.mirror_y()
         if comp.get("rotation"):
             ref.rotate(comp["rotation"])
-        ref.move((comp["x"], comp["y"]))
+        ref.move((comp["x"], -comp["y"] - float(cell.ysize)))
     except Exception as e:
         errors.append(f"{comp.get('cell','?')}[{i}]: {e}")
 
