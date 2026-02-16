@@ -25,11 +25,18 @@ export function isJunctionPinned(junctionId: string): boolean {
   const j = S.documentData.junctions.find((jn) => jn.id === junctionId);
   if (!j) { return true; }
   if (j.style === "hp" || j.style === "vp") { return true; }
-  const count = S.documentData.wires.filter((w) =>
+  const connected = S.documentData.wires.filter((w) =>
     (w.startType === "junction" && w.startId === junctionId) ||
     (w.endType === "junction" && w.endId === junctionId)
-  ).length;
-  return count >= 5;
+  );
+  // Pinned if directly connected to a port (ports are immutable)
+  for (const w of connected) {
+    const isStart = w.startType === "junction" && w.startId === junctionId;
+    if ((isStart && w.endType === "port") || (!isStart && w.startType === "port")) {
+      return true;
+    }
+  }
+  return connected.length >= 5;
 }
 
 // --- Direction classification ---
@@ -50,6 +57,44 @@ export function classifyDirection(junction: OfaJunction, wire: OfaWire): Cardina
 
 function oppositeDir(dir: CardinalDir): CardinalDir {
   return dir === "N" ? "S" : dir === "S" ? "N" : dir === "E" ? "W" : "E";
+}
+
+// --- Direction from two points (no wire object needed) ---
+
+export function classifyDirectionFromPoints(
+  fromX: number, fromY: number, toX: number, toY: number,
+): CardinalDir {
+  const dx = toX - fromX;
+  const dy = toY - fromY;
+  if (Math.abs(dx) > Math.abs(dy)) { return dx > 0 ? "E" : "W"; }
+  return dy > 0 ? "S" : "N";
+}
+
+// --- Occupied / reserved direction queries ---
+
+export function getOccupiedDirections(junctionId: string): Set<CardinalDir> {
+  const dirs = new Set<CardinalDir>();
+  if (!S.documentData) { return dirs; }
+  const junction = S.documentData.junctions.find((j) => j.id === junctionId);
+  if (!junction) { return dirs; }
+  const connected = S.documentData.wires.filter((w) =>
+    (w.startType === "junction" && w.startId === junctionId) ||
+    (w.endType === "junction" && w.endId === junctionId)
+  );
+  for (const wire of connected) {
+    const dir = classifyDirection(junction, wire);
+    if (dir) { dirs.add(dir); }
+  }
+  return dirs;
+}
+
+export function isDirectionAvailable(junctionId: string, dir: CardinalDir): boolean {
+  if (!S.documentData) { return false; }
+  const junction = S.documentData.junctions.find((j) => j.id === junctionId);
+  if (!junction) { return false; }
+  if (junction.reservedDirs && junction.reservedDirs.includes(dir)) { return false; }
+  const occupied = getOccupiedDirections(junctionId);
+  return !occupied.has(dir);
 }
 
 // --- Collinear run: unified primitive for wire drag propagation ---
@@ -113,6 +158,13 @@ export function getCollinearRun(wire: OfaWire): CollinearRun {
     }
 
     walkAxis(epId, wire.id, movable, touched, new Set<string>());
+  }
+
+  // If any junction in the chain is pinned, the entire chain is immovable
+  for (const id of touched) {
+    if (isJunctionPinned(id)) {
+      return { junctions: [], allTouchedIds: touched };
+    }
   }
 
   return { junctions: movable, allTouchedIds: touched };
@@ -308,4 +360,12 @@ export function autoUpdateJunctionStyle(junctionId: string): void {
   } else {
     junction.style = "d2";
   }
+
+  // Auto-compute reservedDirs from connected wires
+  const occupiedDirs: CardinalDir[] = [];
+  for (const wire of connected) {
+    const dir = classifyDirection(junction, wire);
+    if (dir && !occupiedDirs.includes(dir)) { occupiedDirs.push(dir); }
+  }
+  junction.reservedDirs = occupiedDirs.length > 0 ? occupiedDirs : undefined;
 }

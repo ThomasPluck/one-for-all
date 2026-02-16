@@ -53,6 +53,10 @@
       {
         "command": "ofa.exportGds",
         "title": "OFA: Export GDS"
+      },
+      {
+        "command": "ofa.refreshPdkCache",
+        "title": "OFA: Refresh PDK Cache"
       }
     ]
   },

@@ -41,6 +41,7 @@ export interface OfaJunction {
   x: number;
   y: number;
   style: JunctionStyle;
+  reservedDirs?: CardinalDir[];
 }
 
 export interface OfaWire {

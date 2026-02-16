@@ -70,11 +70,25 @@ export function initMessageHandler(): void {
         }
         break;
       case "pdkData": {
+        // Full data (from cache hit — all at once)
         S.pdkCells = (msg.cells || []) as PdkCellInfo[];
         populateSelect(componentSelect, S.pdkCells, "-- Select Device --");
         if (msg.layers && Array.isArray(msg.layers)) {
           applyPdkLayers(msg.layers);
         }
+        break;
+      }
+      case "pdkFastData": {
+        // Progressive: layers + connectivity arrive first (~2s)
+        if (msg.layers && Array.isArray(msg.layers)) {
+          applyPdkLayers(msg.layers);
+        }
+        break;
+      }
+      case "pdkCellData": {
+        // Progressive: cells arrive later (4-15s)
+        S.pdkCells = (msg.cells || []) as PdkCellInfo[];
+        populateSelect(componentSelect, S.pdkCells, "-- Select Device --");
         break;
       }
       case "componentInfoResult": {

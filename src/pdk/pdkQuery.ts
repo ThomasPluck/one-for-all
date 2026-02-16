@@ -285,6 +285,190 @@ print(json.dumps({"xsize": float(c.xsize), "ysize": float(c.ysize), "ports": por
   return JSON.parse(output) as ComponentQueryResult;
 }
 
+/**
+ * Streaming merged query: runs cells + connectivity + layers in a single Python process.
+ * Emits fast data (connectivity + layers) first via onFastData callback,
+ * then resolves with cell data when complete.
+ */
+export function getPdkAllDataStreaming(
+  root: string,
+  config: OfaConfig,
+  onFastData: (connectivity: PdkConnectivityInfo[], layers: PdkLayerInfo[]) => void,
+): Promise<PdkCellInfo[]> {
+  const py = getPythonPath(root);
+  const pdk = config.pythonImport;
+
+  const script = `
+import json, inspect, warnings, sys
+warnings.filterwarnings("ignore")
+from ${pdk} import cells, PDK, connectivity
+from gdsfactory.get_factories import get_cells
+import gdsfactory as gf
+import kfactory as kf
+
+PDK.activate()
+
+# --- Connectivity (fast) ---
+conn_result = [str(c) for c in connectivity]
+
+# --- Layers (fast) ---
+display_map = {}
+try:
+    layer_enum = PDK.layers
+    if layer_enum:
+        for m in layer_enum:
+            if not m.name.endswith('drawing'):
+                continue
+            try:
+                li = kf.kcl.layout.get_info(m.value)
+                display_map[(li.layer, li.datatype)] = m.name[:-7]
+            except Exception:
+                pass
+except Exception:
+    pass
+
+layers_result = []
+ls = PDK.layer_stack
+if ls and hasattr(ls, 'layers'):
+    for name, info in ls.layers.items():
+        if name == 'substrate':
+            continue
+        layer_obj = getattr(info, 'layer', None)
+        if layer_obj is None:
+            continue
+        raw = getattr(layer_obj, 'layer', layer_obj)
+        idx = raw.value if hasattr(raw, 'value') else raw
+        if not isinstance(idx, int):
+            continue
+        try:
+            li = kf.kcl.layout.get_info(idx)
+            gds = [li.layer, li.datatype]
+        except Exception:
+            continue
+        display = display_map.get(tuple(gds), name.capitalize())
+        layers_result.append({"name": display, "gds_layer": gds})
+
+# Emit fast data first
+print("FAST:" + json.dumps({"connectivity": conn_result, "layers": layers_result}))
+sys.stdout.flush()
+
+# --- Cells (slow) ---
+factories = get_cells(cells)
+
+def port_gds_layer(port):
+    if not hasattr(port, "layer") or port.layer is None:
+        return None
+    raw = port.layer
+    if isinstance(raw, int):
+        try:
+            li = kf.kcl.layout.get_info(raw)
+            return [li.layer, li.datatype]
+        except Exception:
+            return [raw, 0]
+    if hasattr(raw, "__iter__"):
+        return list(raw)
+    return [raw, 0]
+
+cells_result = []
+for name, func in factories.items():
+    sig = inspect.signature(func)
+    params = {}
+    for pname, p in sig.parameters.items():
+        if p.default is not inspect.Parameter.empty:
+            try:
+                json.dumps(p.default)
+                params[pname] = p.default
+            except (TypeError, ValueError):
+                pass
+    ports = []
+    xsize = 1.0
+    ysize = 1.0
+    try:
+        c = gf.get_component(func)
+        c.locked = False
+        c.dmove((-c.xmin, -c.ymin))
+        c.locked = True
+        xsize = float(c.xsize)
+        ysize = float(c.ysize)
+        xmin = float(c.xmin)
+        ymin = float(c.ymin)
+        for port in c.ports:
+            ports.append({
+                "name": port.name,
+                "x": float(port.center[0]) - xmin,
+                "y": float(port.center[1]) - ymin,
+                "layer": port_gds_layer(port),
+                "width": float(port.width)
+            })
+    except Exception:
+        pass
+    cells_result.append({"name": name, "params": params, "ports": ports, "xsize": xsize, "ysize": ysize})
+
+print("CELLS:" + json.dumps(cells_result))
+`.trim();
+
+  return new Promise((resolve, reject) => {
+    const proc = cp.execFile(py, ["-c", script], { cwd: root, timeout: 120_000 });
+    let buffer = "";
+    let fastSent = false;
+
+    proc.stdout!.on("data", (chunk: Buffer | string) => {
+      buffer += chunk.toString();
+      const lines = buffer.split("\n");
+      buffer = lines.pop()!; // keep incomplete last line in buffer
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) { continue; }
+        if (trimmed.startsWith("FAST:") && !fastSent) {
+          fastSent = true;
+          try {
+            const fast = JSON.parse(trimmed.slice(5));
+            const layers: PdkLayerInfo[] = (fast.layers || []).map(
+              (l: { name: string; gds_layer: [number, number] }, i: number) => ({
+                ...l,
+                color: LAYER_PALETTE[i % LAYER_PALETTE.length],
+              })
+            );
+            const connectivity: PdkConnectivityInfo[] = (fast.connectivity || []).map(
+              (n: string) => ({ name: n })
+            );
+            onFastData(connectivity, layers);
+          } catch {
+            // skip malformed fast data
+          }
+        } else if (trimmed.startsWith("CELLS:")) {
+          try {
+            resolve(JSON.parse(trimmed.slice(6)) as PdkCellInfo[]);
+          } catch {
+            // skip malformed cell data
+          }
+        }
+        // skip other lines (library warnings)
+      }
+    });
+
+    let stderrBuf = "";
+    proc.stderr!.on("data", (chunk: Buffer | string) => {
+      stderrBuf += chunk.toString();
+    });
+
+    proc.on("error", reject);
+    proc.on("close", (code) => {
+      // Process remaining buffer
+      const trimmed = buffer.trim();
+      if (trimmed.startsWith("CELLS:")) {
+        try {
+          resolve(JSON.parse(trimmed.slice(6)) as PdkCellInfo[]);
+          return;
+        } catch { /* fall through */ }
+      }
+      if (code !== 0) {
+        reject(new Error(stderrBuf || `Python exited with code ${code}`));
+      }
+    });
+  });
+}
+
 export async function exportGds(
   root: string,
   config: OfaConfig,

@@ -5,7 +5,7 @@ import type { OfaJunction, OfaWire, WireAnchor } from "./types";
 import { S, canvas, camera, vscode, componentSizeCache, saveDocument, generateId, getSelectedComponent, getSelectedWire, updateToolbarSelection, clearSelection, btnRotate, btnFlipH, btnFlipV, btnExportGds, btnWireMode, wireLayerSelect, componentSelect } from "./state";
 import { getCellInfo } from "./pdk";
 import { screenToWorld, snapWireEnd, resolveAnchorPosition } from "./geometry";
-import { splitWireAtPoint, autoUpdateJunctionStyle, deleteComponentCascade, deleteJunctionCascade, deleteWireCascade, getCollinearRun } from "./junctions";
+import { splitWireAtPoint, autoUpdateJunctionStyle, deleteComponentCascade, deleteJunctionCascade, deleteWireCascade, getCollinearRun, classifyDirectionFromPoints, isDirectionAvailable, getOccupiedDirections } from "./junctions";
 import { hitTestComponent, hitTestJunction, hitTestWire, hitTestPort, updateHoverCursor } from "./hitTest";
 import { showParamOverlay, showWireOverlay, closeParamOverlay, isParamOverlayOpen, isParamOverlayContaining } from "./overlays";
 
@@ -46,12 +46,348 @@ export function initToolbar(): void {
     S.wireMode = !S.wireMode;
     btnWireMode.classList.toggle("active", S.wireMode);
     if (!S.wireMode) {
-      S.wireDrawing = false;
-      S.wireStartAnchor = null;
-      S.wirePreviewEnd = null;
+      terminateWireDrawing();
     }
     canvas.style.cursor = S.wireMode ? "crosshair" : "default";
   });
+}
+
+// --- Wire drawing helpers ---
+
+function addIntermediateJunction(rawClickPos: { x: number; y: number }): void {
+  if (!S.documentData || !S.wireStartAnchor) { return; }
+
+  const startX = S.wireStartAnchor.x;
+  const startY = S.wireStartAnchor.y;
+  const snapped = snapWireEnd(startX, startY, rawClickPos.x, rawClickPos.y);
+
+  // Don't create zero-length wire
+  if (Math.abs(snapped.x - startX) < 0.01 && Math.abs(snapped.y - startY) < 0.01) { return; }
+
+  // Check reserved direction at start anchor
+  if (S.wireStartAnchor.type === "junction") {
+    const dir = classifyDirectionFromPoints(startX, startY, snapped.x, snapped.y);
+    if (!isDirectionAvailable(S.wireStartAnchor.id, dir)) { return; }
+  }
+
+  const newJ: OfaJunction = { id: generateId(), x: snapped.x, y: snapped.y, style: "d2" };
+  S.documentData.junctions.push(newJ);
+
+  const newWire: OfaWire = {
+    id: generateId(),
+    layer: wireLayerSelect.value,
+    width: 0.1,
+    startId: S.wireStartAnchor.id,
+    startType: S.wireStartAnchor.type,
+    startComponentId: S.wireStartAnchor.componentId,
+    endId: newJ.id,
+    endType: "junction",
+  };
+  S.documentData.wires.push(newWire);
+
+  if (S.wireStartAnchor.type === "junction") { autoUpdateJunctionStyle(S.wireStartAnchor.id); }
+  autoUpdateJunctionStyle(newJ.id);
+
+  S.wireStartAnchor = { type: "junction", id: newJ.id, x: snapped.x, y: snapped.y };
+  S.wireJunctionChain.push(newJ.id);
+  saveDocument();
+}
+
+function fallbackSRoute(startAnchor: WireAnchor, endAnchor: WireAnchor): void {
+  if (!S.documentData) { return; }
+
+  const sx = startAnchor.x, sy = startAnchor.y;
+  const ex = endAnchor.x, ey = endAnchor.y;
+
+  let j1: OfaJunction, j2: OfaJunction;
+  if (Math.abs(ex - sx) >= Math.abs(ey - sy)) {
+    // Wider than tall: horizontal → vertical → horizontal (midX)
+    const midX = Math.round((sx + ex) / 2 * 100) / 100;
+    j1 = { id: generateId(), x: midX, y: sy, style: "d2" };
+    j2 = { id: generateId(), x: midX, y: ey, style: "d2" };
+  } else {
+    // Taller than wide: vertical → horizontal → vertical (midY)
+    const midY = Math.round((sy + ey) / 2 * 100) / 100;
+    j1 = { id: generateId(), x: sx, y: midY, style: "d2" };
+    j2 = { id: generateId(), x: ex, y: midY, style: "d2" };
+  }
+  S.documentData.junctions.push(j1, j2);
+
+  const layer = wireLayerSelect.value;
+  const w1: OfaWire = {
+    id: generateId(), layer, width: 0.1,
+    startId: startAnchor.id, startType: startAnchor.type, startComponentId: startAnchor.componentId,
+    endId: j1.id, endType: "junction",
+  };
+  const w2: OfaWire = {
+    id: generateId(), layer, width: 0.1,
+    startId: j1.id, startType: "junction",
+    endId: j2.id, endType: "junction",
+  };
+  const w3: OfaWire = {
+    id: generateId(), layer, width: 0.1,
+    startId: j2.id, startType: "junction",
+    endId: endAnchor.id, endType: endAnchor.type, endComponentId: endAnchor.componentId,
+  };
+  S.documentData.wires.push(w1, w2, w3);
+
+  if (startAnchor.type === "junction") { autoUpdateJunctionStyle(startAnchor.id); }
+  autoUpdateJunctionStyle(j1.id);
+  autoUpdateJunctionStyle(j2.id);
+  if (endAnchor.type === "junction") { autoUpdateJunctionStyle(endAnchor.id); }
+}
+
+function tryMoveJunctionToAlign(junctionId: string, targetX: number, targetY: number): boolean {
+  if (!S.documentData) return false;
+  const junction = S.documentData.junctions.find(j => j.id === junctionId);
+  if (!junction) return false;
+
+  const wires = S.documentData.wires.filter(w =>
+    (w.startType === "junction" && w.startId === junctionId) ||
+    (w.endType === "junction" && w.endId === junctionId)
+  );
+
+  for (const wire of wires) {
+    const wStart = resolveAnchorPosition(wire.startId, wire.startType, wire.startComponentId);
+    const wEnd = resolveAnchorPosition(wire.endId, wire.endType, wire.endComponentId);
+    if (!wStart || !wEnd) continue;
+
+    const isH = Math.abs(wEnd.y - wStart.y) < 0.001;
+    const neededDelta = isH ? (targetY - junction.y) : (targetX - junction.x);
+    if (Math.abs(neededDelta) < 0.01) continue;
+
+    const run = getCollinearRun(wire);
+    if (run.junctions.length === 0) continue;
+
+    let minDelta = -Infinity, maxDelta = +Infinity;
+    for (const j of run.junctions) {
+      const jWires = S.documentData.wires.filter(cw =>
+        (cw.startType === "junction" && cw.startId === j.id) ||
+        (cw.endType === "junction" && cw.endId === j.id)
+      );
+      for (const cw of jWires) {
+        const cwIsStart = cw.startType === "junction" && cw.startId === j.id;
+        const nPos = resolveAnchorPosition(
+          cwIsStart ? cw.endId : cw.startId,
+          cwIsStart ? cw.endType : cw.startType,
+          cwIsStart ? cw.endComponentId : cw.startComponentId,
+        );
+        if (!nPos) continue;
+        if (isH) {
+          if (Math.abs(nPos.x - j.x) < 0.01) {
+            if (nPos.y > j.y) maxDelta = Math.min(maxDelta, nPos.y - j.y - 0.01);
+            else minDelta = Math.max(minDelta, nPos.y - j.y + 0.01);
+          }
+        } else {
+          if (Math.abs(nPos.y - j.y) < 0.01) {
+            if (nPos.x > j.x) maxDelta = Math.min(maxDelta, nPos.x - j.x - 0.01);
+            else minDelta = Math.max(minDelta, nPos.x - j.x + 0.01);
+          }
+        }
+      }
+    }
+    if (minDelta > maxDelta) continue;
+    const clamped = Math.max(minDelta, Math.min(maxDelta, neededDelta));
+
+    const achieves = isH
+      ? Math.abs((junction.y + clamped) - targetY) < 0.01
+      : Math.abs((junction.x + clamped) - targetX) < 0.01;
+    if (!achieves) continue;
+
+    for (const j of run.junctions) {
+      if (isH) j.y = Math.round((j.y + clamped) * 100) / 100;
+      else j.x = Math.round((j.x + clamped) * 100) / 100;
+    }
+    for (const id of run.allTouchedIds) { autoUpdateJunctionStyle(id); }
+    return true;
+  }
+  return false;
+}
+
+function completeWireToJunction(endAnchor: WireAnchor): void {
+  if (!S.documentData || !S.wireStartAnchor) { return; }
+  if (S.wireStartAnchor.id === endAnchor.id && S.wireStartAnchor.type === endAnchor.type) { return; }
+
+  // Hard reject: all 4 directions occupied on target
+  if (endAnchor.type === "junction") {
+    if (getOccupiedDirections(endAnchor.id).size >= 4) { return; }
+  }
+
+  let connected = false;
+
+  // Helper: check aligned + direction available, then create wire
+  const tryDirectWire = (): boolean => {
+    const aligned = Math.abs(endAnchor.x - S.wireStartAnchor!.x) < 0.01
+                  || Math.abs(endAnchor.y - S.wireStartAnchor!.y) < 0.01;
+    if (!aligned) { return false; }
+    if (S.wireStartAnchor!.type === "junction") {
+      const d = classifyDirectionFromPoints(S.wireStartAnchor!.x, S.wireStartAnchor!.y, endAnchor.x, endAnchor.y);
+      if (!isDirectionAvailable(S.wireStartAnchor!.id, d)) { return false; }
+    }
+    if (endAnchor.type === "junction") {
+      const d = classifyDirectionFromPoints(endAnchor.x, endAnchor.y, S.wireStartAnchor!.x, S.wireStartAnchor!.y);
+      if (!isDirectionAvailable(endAnchor.id, d)) { return false; }
+    }
+    S.documentData!.wires.push({
+      id: generateId(), layer: wireLayerSelect.value, width: 0.1,
+      startId: S.wireStartAnchor!.id, startType: S.wireStartAnchor!.type,
+      startComponentId: S.wireStartAnchor!.componentId,
+      endId: endAnchor.id, endType: endAnchor.type, endComponentId: endAnchor.componentId,
+    });
+    return true;
+  };
+
+  // Step 1: Try direct wire (already aligned + direction available)
+  connected = tryDirectWire();
+
+  // Step 2: Snap last chain junction along its segment (extends length, always geometrically legal)
+  if (!connected && S.wireJunctionChain.length >= 2) {
+    const lastJId = S.wireJunctionChain[S.wireJunctionChain.length - 1];
+    const secId = S.wireJunctionChain[S.wireJunctionChain.length - 2];
+    const lastJ = S.documentData.junctions.find(j => j.id === lastJId);
+    const secJ = S.documentData.junctions.find(j => j.id === secId);
+    if (lastJ && secJ) {
+      const origX = lastJ.x, origY = lastJ.y;
+      const segH = Math.abs(lastJ.x - secJ.x) > Math.abs(lastJ.y - secJ.y);
+      if (segH) { lastJ.x = endAnchor.x; } else { lastJ.y = endAnchor.y; }
+      S.wireStartAnchor.x = lastJ.x;
+      S.wireStartAnchor.y = lastJ.y;
+      autoUpdateJunctionStyle(lastJId);
+      autoUpdateJunctionStyle(secId);
+      connected = tryDirectWire();
+      if (!connected) {
+        lastJ.x = origX; lastJ.y = origY;
+        S.wireStartAnchor.x = origX; S.wireStartAnchor.y = origY;
+        autoUpdateJunctionStyle(lastJId);
+        autoUpdateJunctionStyle(secId);
+      }
+    }
+  }
+
+  // Step 3: Move connecting junction via collinear chain drag
+  if (!connected && S.wireStartAnchor.type === "junction") {
+    if (tryMoveJunctionToAlign(S.wireStartAnchor.id, endAnchor.x, endAnchor.y)) {
+      const j = S.documentData.junctions.find(jn => jn.id === S.wireStartAnchor!.id);
+      if (j) { S.wireStartAnchor.x = j.x; S.wireStartAnchor.y = j.y; }
+      connected = tryDirectWire();
+    }
+  }
+
+  // Step 4: Move target junction via collinear chain drag
+  if (!connected && endAnchor.type === "junction") {
+    if (tryMoveJunctionToAlign(endAnchor.id, S.wireStartAnchor.x, S.wireStartAnchor.y)) {
+      const j = S.documentData.junctions.find(jn => jn.id === endAnchor.id);
+      if (j) { endAnchor.x = j.x; endAnchor.y = j.y; }
+      connected = tryDirectWire();
+    }
+  }
+
+  // Step 5: S-route fallback (zig-zag at midpoint)
+  if (!connected) {
+    fallbackSRoute(S.wireStartAnchor, endAnchor);
+  }
+
+  if (S.wireStartAnchor.type === "junction") { autoUpdateJunctionStyle(S.wireStartAnchor.id); }
+  if (endAnchor.type === "junction") { autoUpdateJunctionStyle(endAnchor.id); }
+
+  saveDocument();
+  S.wireDrawing = false;
+  S.wireStartAnchor = null;
+  S.wirePreviewEnd = null;
+  S.wireJunctionChain = [];
+  S.wireLastClickTime = 0;
+}
+
+function completeWireToPort(portAnchor: WireAnchor): void {
+  if (!S.documentData || !S.wireStartAnchor) { return; }
+
+  // Self-connection guard
+  if (S.wireStartAnchor.type === "port" &&
+      S.wireStartAnchor.id === portAnchor.id &&
+      S.wireStartAnchor.componentId === portAnchor.componentId) {
+    return;
+  }
+
+  const startX = S.wireStartAnchor.x;
+  const startY = S.wireStartAnchor.y;
+  const portX = portAnchor.x;
+  const portY = portAnchor.y;
+  const dx = Math.abs(portX - startX);
+  const dy = Math.abs(portY - startY);
+  const isAligned = dx < 0.01 || dy < 0.01;
+
+  if (isAligned) {
+    // Direct manhattan connection to port
+    const newWire: OfaWire = {
+      id: generateId(),
+      layer: wireLayerSelect.value,
+      width: 0.1,
+      startId: S.wireStartAnchor.id,
+      startType: S.wireStartAnchor.type,
+      startComponentId: S.wireStartAnchor.componentId,
+      endId: portAnchor.id,
+      endType: "port",
+      endComponentId: portAnchor.componentId,
+    };
+    S.documentData.wires.push(newWire);
+    if (S.wireStartAnchor.type === "junction") { autoUpdateJunctionStyle(S.wireStartAnchor.id); }
+  } else {
+    // Not aligned — snap last placed junction to create manhattan path to port
+    const chainLen = S.wireJunctionChain.length;
+
+    if (chainLen >= 2) {
+      // Snap last junction to be inline with port + second-last junction
+      const lastJId = S.wireJunctionChain[chainLen - 1];
+      const secondLastJId = S.wireJunctionChain[chainLen - 2];
+      const lastJ = S.documentData.junctions.find((j) => j.id === lastJId);
+      const secondLastJ = S.documentData.junctions.find((j) => j.id === secondLastJId);
+
+      if (lastJ && secondLastJ) {
+        const segDx = Math.abs(lastJ.x - secondLastJ.x);
+        const segDy = Math.abs(lastJ.y - secondLastJ.y);
+
+        if (segDx > segDy) {
+          // second-last → last was horizontal (same Y) → make last→port vertical
+          lastJ.x = portX;
+        } else {
+          // second-last → last was vertical (same X) → make last→port horizontal
+          lastJ.y = portY;
+        }
+
+        const newWire: OfaWire = {
+          id: generateId(),
+          layer: wireLayerSelect.value,
+          width: 0.1,
+          startId: lastJ.id,
+          startType: "junction",
+          endId: portAnchor.id,
+          endType: "port",
+          endComponentId: portAnchor.componentId,
+        };
+        S.documentData.wires.push(newWire);
+        autoUpdateJunctionStyle(lastJ.id);
+        autoUpdateJunctionStyle(secondLastJId);
+      }
+    } else {
+      // No second-last junction — fall back to S manhattan route
+      fallbackSRoute(S.wireStartAnchor, portAnchor);
+    }
+  }
+
+  saveDocument();
+  S.wireDrawing = false;
+  S.wireStartAnchor = null;
+  S.wirePreviewEnd = null;
+  S.wireJunctionChain = [];
+  S.wireLastClickTime = 0;
+}
+
+function terminateWireDrawing(): void {
+  S.wireDrawing = false;
+  S.wireStartAnchor = null;
+  S.wirePreviewEnd = null;
+  S.wireJunctionChain = [];
+  S.wireLastClickTime = 0;
 }
 
 // --- Event listeners ---
@@ -62,9 +398,7 @@ export function initEventListeners(): void {
     e.preventDefault();
 
     if (S.wireDrawing) {
-      S.wireDrawing = false;
-      S.wireStartAnchor = null;
-      S.wirePreviewEnd = null;
+      terminateWireDrawing();
       return;
     }
 
@@ -107,9 +441,7 @@ export function initEventListeners(): void {
 
     if (e.key === "Escape") {
       if (S.wireDrawing) {
-        S.wireDrawing = false;
-        S.wireStartAnchor = null;
-        S.wirePreviewEnd = null;
+        terminateWireDrawing();
         e.preventDefault();
         return;
       }
@@ -201,16 +533,19 @@ export function initEventListeners(): void {
       // --- WIRE MODE ---
       if (S.wireMode && S.documentData) {
         if (!S.wireDrawing) {
+          // === START WIRE DRAWING ===
           const portHit = hitTestPort(world.x, world.y);
           if (portHit) {
             S.wireStartAnchor = portHit;
             S.wireDrawing = true;
+            S.wireJunctionChain = [];
             return;
           }
           const jHit = hitTestJunction(world.x, world.y);
           if (jHit) {
             S.wireStartAnchor = { type: "junction", id: jHit.id, x: jHit.x, y: jHit.y };
             S.wireDrawing = true;
+            S.wireJunctionChain = [jHit.id];
             return;
           }
           const wireHit = hitTestWire(world.x, world.y);
@@ -219,6 +554,7 @@ export function initEventListeners(): void {
             if (splitJ) {
               S.wireStartAnchor = { type: "junction", id: splitJ.id, x: splitJ.x, y: splitJ.y };
               S.wireDrawing = true;
+              S.wireJunctionChain = [splitJ.id];
               saveDocument();
               return;
             }
@@ -228,108 +564,67 @@ export function initEventListeners(): void {
           S.documentData.junctions.push(newJ);
           S.wireStartAnchor = { type: "junction", id: newJ.id, x: snapped.x, y: snapped.y };
           S.wireDrawing = true;
+          S.wireJunctionChain = [newJ.id];
           saveDocument();
           return;
         } else {
-          // Complete wire
+          // === CONTINUE / TERMINATE WIRE DRAWING ===
           const rawEnd = { x: Math.round(world.x * 100) / 100, y: Math.round(world.y * 100) / 100 };
 
-          let endAnchor: WireAnchor | null = hitTestPort(rawEnd.x, rawEnd.y);
-          if (!endAnchor) {
-            const jHit = hitTestJunction(rawEnd.x, rawEnd.y);
-            if (jHit) {
-              endAnchor = { type: "junction", id: jHit.id, x: jHit.x, y: jHit.y };
-            }
+          // Port hit → always terminate
+          const portHit = hitTestPort(rawEnd.x, rawEnd.y);
+          if (portHit) {
+            completeWireToPort(portHit);
+            return;
           }
-          if (!endAnchor) {
-            const wireHit = hitTestWire(rawEnd.x, rawEnd.y);
-            if (wireHit) {
-              const splitJ = splitWireAtPoint(wireHit, rawEnd.x, rawEnd.y);
-              if (splitJ) {
-                endAnchor = { type: "junction", id: splitJ.id, x: splitJ.x, y: splitJ.y };
+
+          // Junction hit → always terminate
+          const jHit = hitTestJunction(rawEnd.x, rawEnd.y);
+          if (jHit) {
+            completeWireToJunction({ type: "junction", id: jHit.id, x: jHit.x, y: jHit.y });
+            return;
+          }
+
+          // Wire hit → split + terminate (snap-to-target like port termination)
+          const wireHit = hitTestWire(rawEnd.x, rawEnd.y);
+          if (wireHit) {
+            const splitJ = splitWireAtPoint(wireHit, rawEnd.x, rawEnd.y);
+            if (splitJ) {
+              const splitAnchor = { type: "junction" as const, id: splitJ.id, x: splitJ.x, y: splitJ.y };
+              const sX = S.wireStartAnchor!.x;
+              const sY = S.wireStartAnchor!.y;
+              const aligned = Math.abs(splitJ.x - sX) < 0.01 || Math.abs(splitJ.y - sY) < 0.01;
+
+              if (aligned) {
+                completeWireToJunction(splitAnchor);
+              } else if (S.wireJunctionChain.length >= 2) {
+                // Snap last chain junction to align with splitJ (same as port termination)
+                const lastJId = S.wireJunctionChain[S.wireJunctionChain.length - 1];
+                const secondLastJId = S.wireJunctionChain[S.wireJunctionChain.length - 2];
+                const lastJ = S.documentData.junctions.find(j => j.id === lastJId);
+                const secondLastJ = S.documentData.junctions.find(j => j.id === secondLastJId);
+                if (lastJ && secondLastJ) {
+                  const segDx = Math.abs(lastJ.x - secondLastJ.x);
+                  const segDy = Math.abs(lastJ.y - secondLastJ.y);
+                  if (segDx > segDy) { lastJ.x = splitJ.x; }
+                  else { lastJ.y = splitJ.y; }
+                  completeWireToJunction(splitAnchor);
+                }
+              } else {
+                fallbackSRoute(S.wireStartAnchor!, splitAnchor);
+                terminateWireDrawing();
+                saveDocument();
               }
+              return;
             }
           }
 
-          const startX = S.wireStartAnchor!.x;
-          const startY = S.wireStartAnchor!.y;
-          const endPos = endAnchor ? { x: endAnchor.x, y: endAnchor.y } : rawEnd;
-          const adx = Math.abs(endPos.x - startX);
-          const ady = Math.abs(endPos.y - startY);
-          const maxD = Math.max(adx, ady);
-          const minD = Math.min(adx, ady);
-          const isNearlyHV = minD < 0.05 || (maxD > 0 && minD / maxD < 0.33);
-
-          if (isNearlyHV) {
-            if (!endAnchor) {
-              const snapped = snapWireEnd(startX, startY, rawEnd.x, rawEnd.y);
-              const newJ: OfaJunction = { id: generateId(), x: snapped.x, y: snapped.y, style: "d2" };
-              S.documentData.junctions.push(newJ);
-              endAnchor = { type: "junction", id: newJ.id, x: snapped.x, y: snapped.y };
-            }
-
-            if (S.wireStartAnchor!.id === endAnchor.id && S.wireStartAnchor!.type === endAnchor.type) {
-              return;
-            }
-
-            const newWire: OfaWire = {
-              id: generateId(),
-              layer: wireLayerSelect.value,
-              width: 0.1,
-              startId: S.wireStartAnchor!.id,
-              startType: S.wireStartAnchor!.type,
-              startComponentId: S.wireStartAnchor!.componentId,
-              endId: endAnchor.id,
-              endType: endAnchor.type,
-              endComponentId: endAnchor.componentId,
-            };
-            S.documentData.wires.push(newWire);
-
-            if (S.wireStartAnchor!.type === "junction") { autoUpdateJunctionStyle(S.wireStartAnchor!.id); }
-            if (endAnchor.type === "junction") { autoUpdateJunctionStyle(endAnchor.id); }
-          } else {
-            // Manhattan Z-route
-            if (!endAnchor) {
-              const newJ: OfaJunction = { id: generateId(), x: rawEnd.x, y: rawEnd.y, style: "d2" };
-              S.documentData.junctions.push(newJ);
-              endAnchor = { type: "junction", id: newJ.id, x: rawEnd.x, y: rawEnd.y };
-            }
-
-            if (S.wireStartAnchor!.id === endAnchor.id && S.wireStartAnchor!.type === endAnchor.type) {
-              return;
-            }
-
-            const midX = Math.round((startX + endAnchor.x) / 2 * 100) / 100;
-            const j1: OfaJunction = { id: generateId(), x: midX, y: startY, style: "d2" };
-            const j2: OfaJunction = { id: generateId(), x: midX, y: endAnchor.y, style: "d2" };
-            S.documentData.junctions.push(j1, j2);
-
-            const layer = wireLayerSelect.value;
-            const w1: OfaWire = {
-              id: generateId(), layer, width: 0.1,
-              startId: S.wireStartAnchor!.id, startType: S.wireStartAnchor!.type, startComponentId: S.wireStartAnchor!.componentId,
-              endId: j1.id, endType: "junction",
-            };
-            const w2: OfaWire = {
-              id: generateId(), layer, width: 0.1,
-              startId: j1.id, startType: "junction",
-              endId: j2.id, endType: "junction",
-            };
-            const w3: OfaWire = {
-              id: generateId(), layer, width: 0.1,
-              startId: j2.id, startType: "junction",
-              endId: endAnchor.id, endType: endAnchor.type, endComponentId: endAnchor.componentId,
-            };
-            S.documentData.wires.push(w1, w2, w3);
-
-            if (S.wireStartAnchor!.type === "junction") { autoUpdateJunctionStyle(S.wireStartAnchor!.id); }
-            autoUpdateJunctionStyle(j1.id);
-            autoUpdateJunctionStyle(j2.id);
-            if (endAnchor.type === "junction") { autoUpdateJunctionStyle(endAnchor.id); }
-          }
-
-          saveDocument();
-          S.wireStartAnchor = endAnchor;
+          // Empty space → add intermediate junction, continue drawing
+          // Double-click guard: skip if this is the second click of a double-click
+          const now = Date.now();
+          if (now - S.wireLastClickTime < 300) { return; }
+          S.wireLastClickTime = now;
+          addIntermediateJunction(rawEnd);
           return;
         }
       }
@@ -434,12 +729,48 @@ export function initEventListeners(): void {
             const dy = world.y - S.dragStartWorld.y;
             const run = getCollinearRun(w);
 
+            // Pass 1: compute the tightest allowed delta across ALL chain junctions
+            let minDelta = -Infinity;
+            let maxDelta = +Infinity;
+            const rawDelta = isH ? dy : dx;
+
             for (const j of run.junctions) {
-              if (isH) {
-                j.y = Math.round((j.y + dy) * 100) / 100;
-              } else {
-                j.x = Math.round((j.x + dx) * 100) / 100;
+              const jWires = S.documentData!.wires.filter((cw) =>
+                (cw.startType === "junction" && cw.startId === j.id) ||
+                (cw.endType === "junction" && cw.endId === j.id)
+              );
+              for (const cw of jWires) {
+                const cwIsStart = cw.startType === "junction" && cw.startId === j.id;
+                const nPos = resolveAnchorPosition(
+                  cwIsStart ? cw.endId : cw.startId,
+                  cwIsStart ? cw.endType : cw.startType,
+                  cwIsStart ? cw.endComponentId : cw.startComponentId,
+                );
+                if (!nPos) { continue; }
+                if (isH) {
+                  // Vertical perpendicular neighbor (same X)
+                  if (Math.abs(nPos.x - j.x) < 0.01) {
+                    if (nPos.y > j.y) { maxDelta = Math.min(maxDelta, nPos.y - j.y - 0.01); }
+                    else { minDelta = Math.max(minDelta, nPos.y - j.y + 0.01); }
+                  }
+                } else {
+                  // Horizontal perpendicular neighbor (same Y)
+                  if (Math.abs(nPos.y - j.y) < 0.01) {
+                    if (nPos.x > j.x) { maxDelta = Math.min(maxDelta, nPos.x - j.x - 0.01); }
+                    else { minDelta = Math.max(minDelta, nPos.x - j.x + 0.01); }
+                  }
+                }
               }
+            }
+
+            // Resolve: clamp rawDelta into [minDelta, maxDelta], or 0 if boxed in
+            const clampedDelta = (minDelta > maxDelta) ? 0
+              : Math.max(minDelta, Math.min(maxDelta, rawDelta));
+
+            // Pass 2: apply uniform delta to all junctions
+            for (const j of run.junctions) {
+              if (isH) { j.y = Math.round((j.y + clampedDelta) * 100) / 100; }
+              else { j.x = Math.round((j.x + clampedDelta) * 100) / 100; }
             }
 
             S.dragStartWorld = { x: world.x, y: world.y };
@@ -479,6 +810,15 @@ export function initEventListeners(): void {
         saveDocument();
       }
     }
+  });
+
+  // --- Double-click: terminate wire drawing ---
+  canvas.addEventListener("dblclick", (e) => {
+    if (!S.wireDrawing || !S.wireMode || !S.documentData) { return; }
+    e.preventDefault();
+    // First click of dblclick already placed an intermediate junction.
+    // Just terminate drawing, leaving last junction unterminated.
+    terminateWireDrawing();
   });
 
   // Prevent context menu on middle click

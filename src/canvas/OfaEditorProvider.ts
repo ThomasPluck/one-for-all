@@ -1,24 +1,43 @@
 import * as vscode from "vscode";
 import { PdkCellInfo, PdkConnectivityInfo, PdkLayerInfo } from "../types.js";
-import { readConfig, getPdkCells, getPdkConnectivity, getPdkLayers, getComponentInfo, exportGds } from "../pdk/pdkQuery.js";
+import { readConfig, getComponentInfo, exportGds, getPdkAllDataStreaming } from "../pdk/pdkQuery.js";
+import { getPdkPackageVersion, readCache, writeCache, clearCache } from "../pdk/pdkCache.js";
 import { GdsViewerPanel } from "../GdsViewerPanel.js";
 
 export class OfaEditorProvider implements vscode.CustomTextEditorProvider {
   public static readonly viewType = "ofa.schematicEditor";
 
-  private _pdkCellsCache: PdkCellInfo[] | null = null;
-  private _pdkConnectivityCache: PdkConnectivityInfo[] | null = null;
-  private _pdkLayersCache: PdkLayerInfo[] | null = null;
+  // Static shared cache — all editor instances share one copy
+  private static _pdkCellsCache: PdkCellInfo[] | null = null;
+  private static _pdkConnectivityCache: PdkConnectivityInfo[] | null = null;
+  private static _pdkLayersCache: PdkLayerInfo[] | null = null;
+
+  // Dedup guard — prevents duplicate concurrent loads
+  private static _pdkLoadPromise: Promise<void> | null = null;
 
   constructor(private readonly _context: vscode.ExtensionContext) {}
 
   public static register(context: vscode.ExtensionContext): vscode.Disposable {
     const provider = new OfaEditorProvider(context);
-    return vscode.window.registerCustomEditorProvider(
+
+    const editorDisposable = vscode.window.registerCustomEditorProvider(
       OfaEditorProvider.viewType,
       provider,
       { webviewOptions: { retainContextWhenHidden: true } }
     );
+
+    const refreshCmd = vscode.commands.registerCommand("ofa.refreshPdkCache", async () => {
+      const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      if (root) { clearCache(root); }
+      OfaEditorProvider._pdkCellsCache = null;
+      OfaEditorProvider._pdkConnectivityCache = null;
+      OfaEditorProvider._pdkLayersCache = null;
+      OfaEditorProvider._pdkLoadPromise = null;
+      vscode.window.showInformationMessage("OFA: PDK cache cleared. Reopen an .ofa file to re-query.");
+    });
+
+    context.subscriptions.push(editorDisposable, refreshCmd);
+    return editorDisposable;
   }
 
   public async resolveCustomTextEditor(
@@ -148,27 +167,89 @@ export class OfaEditorProvider implements vscode.CustomTextEditorProvider {
     const config = readConfig(root);
     if (!config) { return; }
 
-    try {
-      if (!this._pdkCellsCache) {
-        this._pdkCellsCache = await getPdkCells(root, config);
-      }
-      if (!this._pdkConnectivityCache) {
-        this._pdkConnectivityCache = await getPdkConnectivity(root, config);
-      }
-      // Layers are non-critical — fallback colors exist in canvas
-      if (!this._pdkLayersCache) {
-        try {
-          this._pdkLayersCache = await getPdkLayers(root, config);
-        } catch (layerErr) {
-          console.warn("OFA: Layer query failed, using fallbacks", layerErr);
-        }
-      }
+    // 1. In-memory cache hit — instant
+    if (OfaEditorProvider._pdkCellsCache) {
       webview.postMessage({
         type: "pdkData",
-        cells: this._pdkCellsCache,
-        connectivity: this._pdkConnectivityCache,
-        layers: this._pdkLayersCache ?? [],
+        cells: OfaEditorProvider._pdkCellsCache,
+        connectivity: OfaEditorProvider._pdkConnectivityCache,
+        layers: OfaEditorProvider._pdkLayersCache ?? [],
       });
+      return;
+    }
+
+    // 2. Another instance is already loading — wait for it, then send from cache
+    if (OfaEditorProvider._pdkLoadPromise) {
+      await OfaEditorProvider._pdkLoadPromise;
+      webview.postMessage({
+        type: "pdkData",
+        cells: OfaEditorProvider._pdkCellsCache,
+        connectivity: OfaEditorProvider._pdkConnectivityCache,
+        layers: OfaEditorProvider._pdkLayersCache ?? [],
+      });
+      return;
+    }
+
+    // 3. Cold start — we own the load
+    OfaEditorProvider._pdkLoadPromise = this._doLoadPdkData(webview, root, config);
+    try {
+      await OfaEditorProvider._pdkLoadPromise;
+    } finally {
+      OfaEditorProvider._pdkLoadPromise = null;
+    }
+  }
+
+  private async _doLoadPdkData(
+    webview: vscode.Webview,
+    root: string,
+    config: import("../types.js").OfaConfig
+  ): Promise<void> {
+    // 3a. Try disk cache
+    try {
+      const version = await getPdkPackageVersion(root, config);
+      const cached = readCache(root, config.pythonImport, version);
+      if (cached) {
+        OfaEditorProvider._pdkCellsCache = cached.cells;
+        OfaEditorProvider._pdkConnectivityCache = cached.connectivity;
+        OfaEditorProvider._pdkLayersCache = cached.layers;
+        webview.postMessage({
+          type: "pdkData",
+          cells: cached.cells,
+          connectivity: cached.connectivity,
+          layers: cached.layers,
+        });
+        return;
+      }
+    } catch {
+      // Version query failed — proceed to live query
+    }
+
+    // 3b. Live query — single streaming Python process
+    try {
+      const cells = await getPdkAllDataStreaming(root, config, (connectivity, layers) => {
+        // Fast data callback — send layers + connectivity immediately
+        OfaEditorProvider._pdkConnectivityCache = connectivity;
+        OfaEditorProvider._pdkLayersCache = layers;
+        webview.postMessage({ type: "pdkFastData", connectivity, layers });
+      });
+
+      OfaEditorProvider._pdkCellsCache = cells;
+      webview.postMessage({ type: "pdkCellData", cells });
+
+      // Write disk cache in background
+      try {
+        const version = await getPdkPackageVersion(root, config);
+        writeCache(root, {
+          cacheVersion: 1,
+          pdkName: config.pythonImport,
+          pdkPackageVersion: version,
+          cells,
+          connectivity: OfaEditorProvider._pdkConnectivityCache ?? [],
+          layers: OfaEditorProvider._pdkLayersCache ?? [],
+        });
+      } catch {
+        // Cache write failed — non-fatal
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       vscode.window.showWarningMessage(`OFA: Could not load PDK data — ${msg}`);

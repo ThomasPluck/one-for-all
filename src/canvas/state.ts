@@ -44,6 +44,8 @@ export const S = {
   wireDrawing: false,
   wireStartAnchor: null as WireAnchor | null,
   wirePreviewEnd: null as { x: number; y: number } | null,
+  wireJunctionChain: [] as string[],
+  wireLastClickTime: 0,
 };
 
 // --- Caches ---

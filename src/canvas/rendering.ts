@@ -133,7 +133,7 @@ function drawWires(): void {
     ctx.restore();
   }
 
-  // Wire preview during drawing
+  // Wire preview during drawing — single manhattan-snapped line
   if (S.wireDrawing && S.wireStartAnchor && S.wirePreviewEnd) {
     const color = LAYER_COLORS[wireLayerSelect.value] || "#888";
     ctx.save();
@@ -144,24 +144,10 @@ function drawWires(): void {
     ctx.setLineDash([0.1, 0.05]);
 
     const sx = S.wireStartAnchor.x, sy = S.wireStartAnchor.y;
-    const ex = S.wirePreviewEnd.x, ey = S.wirePreviewEnd.y;
-    const adx = Math.abs(ex - sx), ady = Math.abs(ey - sy);
-    const maxD = Math.max(adx, ady), minD = Math.min(adx, ady);
-    const isNearlyHV = minD < 0.05 || (maxD > 0 && minD / maxD < 0.33);
-
+    const snapped = snapWireEnd(sx, sy, S.wirePreviewEnd.x, S.wirePreviewEnd.y);
     ctx.beginPath();
-    if (isNearlyHV) {
-      const snapped = snapWireEnd(sx, sy, ex, ey);
-      ctx.moveTo(sx, sy);
-      ctx.lineTo(snapped.x, snapped.y);
-    } else {
-      // Z-route preview: H → V → H
-      const midX = (sx + ex) / 2;
-      ctx.moveTo(sx, sy);
-      ctx.lineTo(midX, sy);
-      ctx.lineTo(midX, ey);
-      ctx.lineTo(ex, ey);
-    }
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(snapped.x, snapped.y);
     ctx.stroke();
     ctx.setLineDash([]);
     ctx.restore();

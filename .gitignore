@@ -4,3 +4,4 @@ dist/
 .venv/
 ofa-config.json
 scratch/
+.ofa-cache/

@@ -39,12 +39,8 @@ Junction styles are auto-updated for all affected junctions on mouseup
 
 - [x] Refactor canvasScript.ts monofile.
 
-- [ ] Replace default "S" manhattan routing with "L" manhattan routing
+- [x] Replace default "S" manhattan routing with click to add junction, only allow the drawing of straights between clicks, double click to terminate wire on an unterminated junction, always terminate when clicking on another junction or port. Ensure Manhattan snapping, moving the previous junction to preserve manhattan routing (from one junction to the next only the x XOR y coordinate should change) recall that ports are immutable, so, if wire terminates on one, snap the last placed junction to be inline with the port and the second last junction - there is no second last junction, force S manhattan route.
 
-- [ ] Reserve junction orientations - do not allow two wires to connect to the same orientation on a junction.
+- [x] Designate cardinal directions of a junction to preserved, making it illegal to draw a wire either to or from this junction in that the reserved cardinal direction - this simplifies extraction down the road.
 
-- [ ] Allow for the deletion of horizontal/vertical junctions, fuse the two wires into one, and choose a material (default if connected to port, port material wins, otherwise, blah, we don't care).
-
-- [ ] If wires are collinear and horizontal all collinear junctions should have the same y coordinate (attached vertical wires must rubber band accordingly) and likewise vertical all collinear must have same x coordinate, etc.
-
-- [ ] Any deviation from verticality or horizontality when joining two terminal junctions/ports must result in an "S" manhattan join.
+**Wire movement and reserved directions**: When a collinear wire chain terminates at a port, the port-adjacent junction is treated as pinned (immutable), making the entire collinear chain immovable — this preserves manhattan routing with the immutable port. During wire drag (rubber-banding), junctions are clamped so that no connected wire can reverse its cardinal direction; a wire going EAST from a junction can be extended by moving the junction WEST, but the junction can never cross past its EAST neighbor (which would flip the direction to WEST). Reserved cardinal directions (`reservedDirs`) only block *new wire creation* in an occupied direction — they do not constrain drag movement, which is governed by the direction-flip clamp instead.
