@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import * as path from "path";
 import { PdkCellInfo, PdkConnectivityInfo, PdkLayerInfo } from "../types.js";
 import { readConfig, getComponentInfo, exportGds, getPdkAllDataStreaming } from "../pdk/pdkQuery.js";
 import { getPdkPackageVersion, readCache, writeCache, clearCache } from "../pdk/pdkCache.js";
@@ -74,6 +75,7 @@ export class OfaEditorProvider implements vscode.CustomTextEditorProvider {
         case "ready":
           sendDocumentUpdate();
           await this._sendPdkData(webviewPanel.webview);
+          await this._sendIncludeList(webviewPanel.webview, document.uri);
           break;
         case "edit": {
           isApplyingEdit = true;
@@ -82,10 +84,24 @@ export class OfaEditorProvider implements vscode.CustomTextEditorProvider {
             document.positionAt(0),
             document.positionAt(document.getText().length)
           );
+          // Strip _cache from components and includes before saving
+          const dataToSave = { ...msg.data };
+          if (dataToSave.components && Array.isArray(dataToSave.components)) {
+            dataToSave.components = dataToSave.components.map((comp: Record<string, unknown>) => {
+              const { _cache, ...rest } = comp;
+              return rest;
+            });
+          }
+          if (dataToSave.includes && Array.isArray(dataToSave.includes)) {
+            dataToSave.includes = dataToSave.includes.map((inc: Record<string, unknown>) => {
+              const { _cache, ...rest } = inc;
+              return rest;
+            });
+          }
           edit.replace(
             document.uri,
             fullRange,
-            JSON.stringify(msg.data, null, 2)
+            JSON.stringify(dataToSave, null, 2)
           );
           await vscode.workspace.applyEdit(edit);
           isApplyingEdit = false;
@@ -145,6 +161,70 @@ export class OfaEditorProvider implements vscode.CustomTextEditorProvider {
           }
           break;
         }
+        case "queryIncludeGeometry": {
+          const docDir = path.dirname(document.uri.fsPath);
+          const targetPath = path.resolve(docDir, msg.file);
+          // Self-inclusion guard
+          if (targetPath === document.uri.fsPath) { break; }
+          try {
+            const content = await vscode.workspace.fs.readFile(vscode.Uri.file(targetPath));
+            const text = new TextDecoder().decode(content);
+            const parsed = JSON.parse(text);
+
+            // Compute bounding box
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            for (const comp of parsed.components ?? []) {
+              const cellInfo = OfaEditorProvider._pdkCellsCache?.find((c: PdkCellInfo) => c.name === comp.cell);
+              const w = cellInfo?.xsize ?? 2;
+              const h = cellInfo?.ysize ?? 2;
+              minX = Math.min(minX, comp.x);
+              minY = Math.min(minY, comp.y);
+              maxX = Math.max(maxX, comp.x + w);
+              maxY = Math.max(maxY, comp.y + h);
+            }
+            for (const j of parsed.junctions ?? []) {
+              minX = Math.min(minX, j.x);
+              minY = Math.min(minY, j.y);
+              maxX = Math.max(maxX, j.x);
+              maxY = Math.max(maxY, j.y);
+            }
+            for (const ep of parsed.externalPorts ?? []) {
+              minX = Math.min(minX, ep.x);
+              minY = Math.min(minY, ep.y);
+              maxX = Math.max(maxX, ep.x);
+              maxY = Math.max(maxY, ep.y);
+            }
+            if (minX === Infinity) { minX = minY = 0; maxX = maxY = 2; }
+
+            // Normalize coordinates to (0,0)
+            const normalizedDoc = {
+              components: (parsed.components ?? []).map((c: Record<string, unknown>) => ({ ...c, x: (c.x as number) - minX, y: (c.y as number) - minY })),
+              junctions: (parsed.junctions ?? []).map((j: Record<string, unknown>) => ({ ...j, x: (j.x as number) - minX, y: (j.y as number) - minY })),
+              wires: parsed.wires ?? [],
+              externalPorts: (parsed.externalPorts ?? []).map((ep: Record<string, unknown>) => ({ ...ep, x: (ep.x as number) - minX, y: (ep.y as number) - minY })),
+            };
+
+            webviewPanel.webview.postMessage({
+              type: "includeGeometryResult",
+              includeId: msg.includeId,
+              geometry: { xsize: maxX - minX, ysize: maxY - minY, document: normalizedDoc },
+            });
+          } catch (err) {
+            console.warn(`OFA: Failed to read include file ${msg.file}:`, err);
+          }
+          break;
+        }
+        case "openIncludeFile": {
+          const docDir = path.dirname(document.uri.fsPath);
+          const targetPath = path.resolve(docDir, msg.file);
+          const targetUri = vscode.Uri.file(targetPath);
+          try {
+            await vscode.commands.executeCommand("vscode.openWith", targetUri, OfaEditorProvider.viewType);
+          } catch {
+            vscode.window.showErrorMessage(`Could not open include file: ${msg.file}`);
+          }
+          break;
+        }
       }
     });
 
@@ -155,8 +235,28 @@ export class OfaEditorProvider implements vscode.CustomTextEditorProvider {
       }
     });
 
+    // Watch .ofa files for include geometry invalidation
+    const ofaWatcher = vscode.workspace.createFileSystemWatcher("**/*.ofa");
+    let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+    const refreshIncludes = (changedUri: vscode.Uri) => {
+      if (changedUri.fsPath === document.uri.fsPath) { return; }
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        this._sendIncludeList(webviewPanel.webview, document.uri);
+        // Notify webview to re-query geometry for any includes referencing this file
+        const docDir = path.dirname(document.uri.fsPath);
+        const relPath = path.relative(docDir, changedUri.fsPath).replace(/\\/g, "/");
+        webviewPanel.webview.postMessage({ type: "includeFileChanged", file: relPath });
+      }, 500);
+    };
+    ofaWatcher.onDidChange(refreshIncludes);
+    ofaWatcher.onDidCreate(refreshIncludes);
+    ofaWatcher.onDidDelete(refreshIncludes);
+
     webviewPanel.onDidDispose(() => {
       changeListener.dispose();
+      ofaWatcher.dispose();
+      clearTimeout(debounceTimer);
     });
   }
 
@@ -256,6 +356,19 @@ export class OfaEditorProvider implements vscode.CustomTextEditorProvider {
     }
   }
 
+  private async _sendIncludeList(webview: vscode.Webview, currentUri: vscode.Uri): Promise<void> {
+    try {
+      const files = await vscode.workspace.findFiles("**/*.ofa");
+      const docDir = path.dirname(currentUri.fsPath);
+      const items = files
+        .filter(f => f.fsPath !== currentUri.fsPath)
+        .map(f => path.relative(docDir, f.fsPath).replace(/\\/g, "/"));
+      webview.postMessage({ type: "includeList", files: items });
+    } catch {
+      // Non-fatal — dropdown stays empty
+    }
+  }
+
   private _getHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
     const cssUri = webview.asWebviewUri(
       vscode.Uri.joinPath(extensionUri, "media", "canvas.css")
@@ -280,7 +393,14 @@ export class OfaEditorProvider implements vscode.CustomTextEditorProvider {
       </select>
     </div>
     <div class="toolbar-group">
+      <label for="includeSelect">Include:</label>
+      <select id="includeSelect">
+        <option value="">-- Select .ofa --</option>
+      </select>
+    </div>
+    <div class="toolbar-group">
       <button id="btnWireMode" class="toolbar-btn" title="Wire mode (w)" style="font-size: 11px; width: auto; padding: 0 8px;">Wire</button>
+      <button id="btnExtPortMode" class="toolbar-btn" title="External port (e)" style="font-size: 11px; width: auto; padding: 0 8px;">ExtPort</button>
       <label for="wireLayerSelect">Layer:</label>
       <select id="wireLayerSelect">
         <option value="">Loading...</option>

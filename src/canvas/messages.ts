@@ -1,7 +1,7 @@
 // Extension message handling (window "message" event listener)
 
-import type { PdkCellInfo } from "./types";
-import { S, componentSizeCache, pendingQueries, vscode, componentSelect, btnExportGds, saveDocument, clearSelection } from "./state";
+import type { IncludeGeometry, PdkCellInfo } from "./types";
+import { S, componentSizeCache, pendingQueries, vscode, componentSelect, includeSelect, includeGeometryCache, pendingIncludeQueries, btnExportGds, saveDocument, clearSelection } from "./state";
 import { applyPdkLayers, getCellInfo } from "./pdk";
 
 function populateSelect(select: HTMLSelectElement, items: { name: string }[], placeholder: string): void {
@@ -26,13 +26,8 @@ export function initMessageHandler(): void {
         S.documentData = msg.data;
         if (S.documentData && !S.documentData.junctions) { S.documentData.junctions = []; }
         if (S.documentData && !S.documentData.wires) { S.documentData.wires = []; }
-        if (S.documentData) {
-          for (const comp of S.documentData.components) {
-            if (comp._cache && !componentSizeCache.has(comp.id)) {
-              componentSizeCache.set(comp.id, comp._cache);
-            }
-          }
-        }
+        if (S.documentData && !S.documentData.externalPorts) { S.documentData.externalPorts = []; }
+        if (S.documentData && !S.documentData.includes) { S.documentData.includes = []; }
         if (S.selection.type === "component" && S.selection.id) {
           const stillExists = S.documentData!.components.some((c) => c.id === S.selection.id);
           if (!stillExists) { clearSelection(); }
@@ -41,6 +36,12 @@ export function initMessageHandler(): void {
           if (!stillExists) { clearSelection(); }
         } else if (S.selection.type === "wire" && S.selection.id) {
           const stillExists = S.documentData!.wires.some((w) => w.id === S.selection.id);
+          if (!stillExists) { clearSelection(); }
+        } else if (S.selection.type === "externalPort" && S.selection.id) {
+          const stillExists = S.documentData!.externalPorts.some((ep) => ep.id === S.selection.id);
+          if (!stillExists) { clearSelection(); }
+        } else if (S.selection.type === "include" && S.selection.id) {
+          const stillExists = (S.documentData!.includes ?? []).some((inc) => inc.id === S.selection.id);
           if (!stillExists) { clearSelection(); }
         }
         if (S.documentData) {
@@ -65,6 +66,13 @@ export function initMessageHandler(): void {
                 cellName: comp.cell,
                 params: comp.params,
               });
+            }
+          }
+          // Request missing include geometry
+          for (const inc of S.documentData.includes ?? []) {
+            if (!includeGeometryCache.has(inc.id) && !pendingIncludeQueries.has(inc.id)) {
+              pendingIncludeQueries.add(inc.id);
+              vscode.postMessage({ type: "queryIncludeGeometry", includeId: inc.id, file: inc.file });
             }
           }
         }
@@ -96,15 +104,7 @@ export function initMessageHandler(): void {
         if (msg.error) {
           console.warn(`OFA: Component query failed for ${msg.componentId}: ${msg.error}`);
         } else {
-          const cached = { xsize: msg.xsize, ysize: msg.ysize, ports: msg.ports };
-          componentSizeCache.set(msg.componentId, cached);
-          if (S.documentData) {
-            const comp = S.documentData.components.find((c) => c.id === msg.componentId);
-            if (comp) {
-              comp._cache = cached;
-              saveDocument();
-            }
-          }
+          componentSizeCache.set(msg.componentId, { xsize: msg.xsize, ysize: msg.ysize, ports: msg.ports });
         }
         break;
       }
@@ -113,6 +113,41 @@ export function initMessageHandler(): void {
         btnExportGds.textContent = "Export GDS";
         if (msg.error) {
           console.warn(`OFA: GDS export failed: ${msg.error}`);
+        }
+        break;
+      }
+      case "includeGeometryResult": {
+        pendingIncludeQueries.delete(msg.includeId);
+        if (msg.geometry) {
+          includeGeometryCache.set(msg.includeId, msg.geometry as IncludeGeometry);
+        }
+        break;
+      }
+      case "includeList": {
+        const files: string[] = msg.files ?? [];
+        includeSelect.innerHTML = "";
+        const defaultOpt = document.createElement("option");
+        defaultOpt.value = "";
+        defaultOpt.textContent = "-- Select .ofa --";
+        includeSelect.appendChild(defaultOpt);
+        for (const f of files) {
+          const opt = document.createElement("option");
+          opt.value = f;
+          opt.textContent = f;
+          includeSelect.appendChild(opt);
+        }
+        break;
+      }
+      case "includeFileChanged": {
+        // Re-query geometry for any includes referencing the changed file
+        if (!S.documentData) { break; }
+        const changedFile = msg.file as string;
+        for (const inc of S.documentData.includes ?? []) {
+          if (inc.file === changedFile) {
+            includeGeometryCache.delete(inc.id);
+            pendingIncludeQueries.add(inc.id);
+            vscode.postMessage({ type: "queryIncludeGeometry", includeId: inc.id, file: inc.file });
+          }
         }
         break;
       }

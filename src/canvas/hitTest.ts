@@ -1,9 +1,9 @@
 // Hit testing for components, junctions, wires, and ports
 
-import type { OfaComponent, OfaJunction, OfaWire, WireAnchor } from "./types";
-import { S, JUNCTION_RADIUS, canvas, camera, componentSizeCache } from "./state";
+import type { OfaComponent, OfaExternalPort, OfaInclude, OfaJunction, OfaWire, WireAnchor } from "./types";
+import { S, JUNCTION_RADIUS, canvas, camera, componentSizeCache, includeGeometryCache } from "./state";
 import { getCellInfo, getDeviceSize } from "./pdk";
-import { resolveAnchorPosition, transformPortToWorld, pointToSegmentDist } from "./geometry";
+import { resolveAnchorPosition, transformPortToWorld, transformIncludePortToWorld, pointToSegmentDist } from "./geometry";
 
 export function hitTestComponent(worldX: number, worldY: number): OfaComponent | null {
   if (!S.documentData) { return null; }
@@ -50,6 +50,60 @@ export function hitTestWire(worldX: number, worldY: number): OfaWire | null {
   return null;
 }
 
+const EXTERNAL_PORT_SIZE = 0.3;
+
+export function hitTestExternalPort(worldX: number, worldY: number): OfaExternalPort | null {
+  if (!S.documentData) { return null; }
+  const s = EXTERNAL_PORT_SIZE;
+  for (let i = S.documentData.externalPorts.length - 1; i >= 0; i--) {
+    const ep = S.documentData.externalPorts[i];
+    if (Math.abs(worldX - ep.x) + Math.abs(worldY - ep.y) <= s) {
+      return ep;
+    }
+  }
+  return null;
+}
+
+export function hitTestInclude(worldX: number, worldY: number): OfaInclude | null {
+  if (!S.documentData) { return null; }
+  const includes = S.documentData.includes ?? [];
+  for (let i = includes.length - 1; i >= 0; i--) {
+    const inc = includes[i];
+    const geom = includeGeometryCache.get(inc.id);
+    const w = geom ? Math.max(geom.xsize, 0.1) : 2;
+    const h = geom ? Math.max(geom.ysize, 0.1) : 2;
+    if (worldX >= inc.x && worldX <= inc.x + w &&
+        worldY >= inc.y && worldY <= inc.y + h) {
+      return inc;
+    }
+  }
+  return null;
+}
+
+export function hitTestIncludePort(worldX: number, worldY: number): WireAnchor | null {
+  if (!S.documentData) { return null; }
+  const includes = S.documentData.includes ?? [];
+  const s = EXTERNAL_PORT_SIZE;
+  for (let i = includes.length - 1; i >= 0; i--) {
+    const inc = includes[i];
+    const geom = includeGeometryCache.get(inc.id);
+    if (!geom || !geom.document.externalPorts) { continue; }
+    for (const ep of geom.document.externalPorts) {
+      const wp = transformIncludePortToWorld(inc, ep.x, ep.y);
+      if (Math.abs(worldX - wp.x) + Math.abs(worldY - wp.y) <= s) {
+        return {
+          type: "includePort",
+          id: ep.name,
+          componentId: inc.id,
+          x: wp.x,
+          y: wp.y,
+        };
+      }
+    }
+  }
+  return null;
+}
+
 export function hitTestPort(worldX: number, worldY: number): WireAnchor | null {
   if (!S.documentData) { return null; }
   for (const comp of S.documentData.components) {
@@ -79,6 +133,15 @@ export function updateHoverCursor(worldX: number, worldY: number): void {
   if (S.spaceHeld || S.wireMode) { return; }
   const j = hitTestJunction(worldX, worldY);
   if (j) { canvas.style.cursor = "pointer"; return; }
+  const ep = hitTestExternalPort(worldX, worldY);
+  if (ep) { canvas.style.cursor = "pointer"; return; }
+  const ip = hitTestIncludePort(worldX, worldY);
+  if (ip) { canvas.style.cursor = "pointer"; return; }
+  const inc = hitTestInclude(worldX, worldY);
+  if (inc) {
+    canvas.style.cursor = S.selection.type === "include" && S.selection.id === inc.id ? "move" : "pointer";
+    return;
+  }
   const comp = hitTestComponent(worldX, worldY);
   if (comp) {
     canvas.style.cursor = S.selection.type === "component" && S.selection.id === comp.id ? "move" : "pointer";

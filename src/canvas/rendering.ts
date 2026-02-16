@@ -1,10 +1,10 @@
 // All draw/render functions: grid, origin, wires, junctions, components,
 // selection, legend, scale bar, canvas resize, and the render loop
 
-import type { OfaComponent } from "./types";
-import { S, JUNCTION_RADIUS, canvas, ctx, camera, componentSizeCache, wireLayerSelect, getSelectedComponent, getSelectedJunction, getSelectedWire } from "./state";
+import type { DocumentData, OfaComponent, OfaInclude } from "./types";
+import { S, JUNCTION_RADIUS, canvas, ctx, camera, componentSizeCache, wireLayerSelect, includeGeometryCache, getSelectedComponent, getSelectedJunction, getSelectedWire, getSelectedExternalPort, getSelectedInclude } from "./state";
 import { LAYER_COLORS, getCellInfo, getDeviceSize, layerColor } from "./pdk";
-import { resolveAnchorPosition, snapWireEnd } from "./geometry";
+import { resolveAnchorPosition, resolveAnchorInDoc, snapWireEnd } from "./geometry";
 import { computeJunctionColors } from "./junctions";
 
 // --- Canvas resize ---
@@ -240,6 +240,204 @@ function drawJunctions(): void {
   }
 }
 
+// --- External port rendering ---
+
+export const EXTERNAL_PORT_SIZE = JUNCTION_RADIUS * 2;
+
+function drawExternalPorts(): void {
+  if (!S.documentData) { return; }
+
+  for (const ep of S.documentData.externalPorts) {
+    const s = EXTERNAL_PORT_SIZE;
+    const color = LAYER_COLORS[ep.layer] || "#888";
+
+    ctx.save();
+    ctx.translate(ep.x, ep.y);
+
+    // Filled rhombus
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.6;
+    ctx.beginPath();
+    ctx.moveTo(0, -s);
+    ctx.lineTo(s, 0);
+    ctx.lineTo(0, s);
+    ctx.lineTo(-s, 0);
+    ctx.closePath();
+    ctx.fill();
+
+    // Outline
+    ctx.globalAlpha = 1.0;
+    ctx.strokeStyle = "rgba(255,255,255,0.7)";
+    ctx.lineWidth = 0.5 / camera.zoom;
+    ctx.stroke();
+
+    // Name label (above the rhombus)
+    const fontSize = Math.max(0.15, s * 0.8);
+    ctx.font = `bold ${fontSize}px sans-serif`;
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.9;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
+    ctx.fillText(ep.name, 0, -s - fontSize * 0.3);
+
+    ctx.restore();
+  }
+}
+
+// --- Include (subcell) rendering ---
+
+function getIncludeSize(inc: OfaInclude): { w: number; h: number } {
+  const geom = includeGeometryCache.get(inc.id);
+  return geom ? { w: Math.max(geom.xsize, 0.1), h: Math.max(geom.ysize, 0.1) } : { w: 2, h: 2 };
+}
+
+function applyIncludeTransform(inc: OfaInclude, w: number, h: number): void {
+  if (inc.rotation) {
+    ctx.translate(w / 2, h / 2);
+    ctx.rotate((inc.rotation * Math.PI) / 180);
+    ctx.translate(-w / 2, -h / 2);
+  }
+  if (inc.flipH) {
+    ctx.translate(w / 2, 0);
+    ctx.scale(-1, 1);
+    ctx.translate(-w / 2, 0);
+  }
+  if (inc.flipV) {
+    ctx.translate(0, h / 2);
+    ctx.scale(1, -1);
+    ctx.translate(0, -h / 2);
+  }
+}
+
+function drawIncludeContents(doc: DocumentData): void {
+  ctx.save();
+  ctx.globalAlpha *= 0.4;
+
+  // Draw nested components as small rects
+  for (const comp of doc.components) {
+    const cellInfo = getCellInfo(comp.cell);
+    const cw = cellInfo ? Math.max(cellInfo.xsize, 0.05) : 1;
+    const ch = cellInfo ? Math.max(cellInfo.ysize, 0.05) : 1;
+    ctx.fillStyle = "rgba(60, 120, 180, 0.3)";
+    ctx.fillRect(comp.x, comp.y, cw, ch);
+    ctx.strokeStyle = "rgba(100, 180, 255, 0.5)";
+    ctx.lineWidth = 0.5 / camera.zoom;
+    ctx.strokeRect(comp.x, comp.y, cw, ch);
+  }
+
+  // Draw nested wires
+  for (const wire of doc.wires) {
+    const start = resolveAnchorInDoc(doc, wire.startId, wire.startType, wire.startComponentId);
+    const end = resolveAnchorInDoc(doc, wire.endId, wire.endType, wire.endComponentId);
+    if (!start || !end) { continue; }
+    ctx.strokeStyle = LAYER_COLORS[wire.layer] || "#888";
+    ctx.lineWidth = Math.max(wire.width, 0.03);
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(start.x, start.y);
+    ctx.lineTo(end.x, end.y);
+    ctx.stroke();
+  }
+
+  // Draw nested junctions
+  for (const j of doc.junctions) {
+    ctx.fillStyle = "#aaa";
+    ctx.beginPath();
+    ctx.arc(j.x, j.y, JUNCTION_RADIUS * 0.6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Draw nested external ports (prominent — these are connectable from parent)
+  if (doc.externalPorts) {
+    // Temporarily boost alpha so include ports stand out
+    const prevAlpha = ctx.globalAlpha;
+    ctx.globalAlpha = 1.0;
+    for (const ep of doc.externalPorts) {
+      const color = LAYER_COLORS[ep.layer] || "#888";
+      const s = EXTERNAL_PORT_SIZE;
+
+      // Filled rhombus
+      ctx.fillStyle = color;
+      ctx.globalAlpha = 0.6;
+      ctx.beginPath();
+      ctx.moveTo(ep.x, ep.y - s);
+      ctx.lineTo(ep.x + s, ep.y);
+      ctx.lineTo(ep.x, ep.y + s);
+      ctx.lineTo(ep.x - s, ep.y);
+      ctx.closePath();
+      ctx.fill();
+
+      // White outline
+      ctx.globalAlpha = 1.0;
+      ctx.strokeStyle = "rgba(255,255,255,0.7)";
+      ctx.lineWidth = 0.5 / camera.zoom;
+      ctx.stroke();
+
+      // Name label
+      const fontSize = Math.max(0.15, s * 0.8);
+      ctx.font = `bold ${fontSize}px sans-serif`;
+      ctx.fillStyle = color;
+      ctx.globalAlpha = 0.9;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      ctx.fillText(ep.name, ep.x, ep.y - s - fontSize * 0.3);
+    }
+    ctx.globalAlpha = prevAlpha;
+  }
+
+  ctx.restore();
+}
+
+function drawIncludes(): void {
+  if (!S.documentData) { return; }
+  const includes = S.documentData.includes ?? [];
+
+  for (const inc of includes) {
+    const { w, h } = getIncludeSize(inc);
+    const geom = includeGeometryCache.get(inc.id);
+
+    ctx.save();
+    ctx.translate(inc.x, inc.y);
+    applyIncludeTransform(inc, w, h);
+
+    // Dashed purple bounding box (distinct from component blue)
+    ctx.fillStyle = "rgba(180, 100, 220, 0.12)";
+    ctx.strokeStyle = "rgba(200, 140, 255, 0.7)";
+    ctx.lineWidth = 1.5 / camera.zoom;
+    ctx.setLineDash([4 / camera.zoom, 2 / camera.zoom]);
+    ctx.fillRect(0, 0, w, h);
+    ctx.strokeRect(0, 0, w, h);
+    ctx.setLineDash([]);
+
+    // Draw nested geometry if available
+    if (geom) {
+      drawIncludeContents(geom.document);
+    }
+
+    // Filename label
+    const label = inc.file.replace(/\.ofa$/, "");
+    const padX = w * 0.1;
+    const availW = w - padX * 2;
+    const availH = h * 0.3;
+    const fontSize = fitText(label, availW, availH, h * 0.3);
+    ctx.font = `bold ${fontSize}px sans-serif`;
+    ctx.fillStyle = "rgba(220, 180, 255, 0.9)";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
+    ctx.fillText(label, w / 2, h / 2);
+
+    // Short ID below label
+    const shortId = inc.id.substring(0, 6);
+    const idFontSize = fitText(shortId, availW, h * 0.2, h * 0.2);
+    ctx.font = `${idFontSize}px sans-serif`;
+    ctx.fillStyle = "rgba(200, 170, 240, 0.6)";
+    ctx.textBaseline = "top";
+    ctx.fillText(shortId, w / 2, h / 2);
+
+    ctx.restore();
+  }
+}
+
 // --- Device rendering ---
 
 function fitText(text: string, maxW: number, maxH: number, maxFontSize: number): number {
@@ -376,6 +574,36 @@ function drawSelection(): void {
     ctx.stroke();
     ctx.setLineDash([]);
     ctx.restore();
+  } else if (S.selection.type === "externalPort") {
+    const ep = getSelectedExternalPort();
+    if (!ep) { return; }
+    const s = EXTERNAL_PORT_SIZE * 1.4;
+    ctx.save();
+    ctx.strokeStyle = "#ffcc00";
+    ctx.lineWidth = 2 / camera.zoom;
+    ctx.setLineDash([6 / camera.zoom, 4 / camera.zoom]);
+    ctx.beginPath();
+    ctx.moveTo(ep.x, ep.y - s);
+    ctx.lineTo(ep.x + s, ep.y);
+    ctx.lineTo(ep.x, ep.y + s);
+    ctx.lineTo(ep.x - s, ep.y);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  } else if (S.selection.type === "include") {
+    const inc = getSelectedInclude();
+    if (!inc) { return; }
+    const { w, h } = getIncludeSize(inc);
+    ctx.save();
+    ctx.translate(inc.x, inc.y);
+    applyIncludeTransform(inc, w, h);
+    ctx.strokeStyle = "#ffcc00";
+    ctx.lineWidth = 2 / camera.zoom;
+    ctx.setLineDash([6 / camera.zoom, 4 / camera.zoom]);
+    ctx.strokeRect(0, 0, w, h);
+    ctx.setLineDash([]);
+    ctx.restore();
   }
 }
 
@@ -477,8 +705,10 @@ export function render(): void {
   drawGrid(w, h);
   drawOrigin();
   drawWires();
+  drawIncludes();
   drawComponents();
   drawJunctions();
+  drawExternalPorts();
   drawSelection();
 
   ctx.restore();

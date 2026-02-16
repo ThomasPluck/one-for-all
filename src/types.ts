@@ -31,11 +31,6 @@ export interface OfaComponent {
   flipH?: boolean;
   flipV?: boolean;
   params: Record<string, number | string | boolean>;
-  _cache?: {
-    xsize: number;
-    ysize: number;
-    ports: PdkPortInfo[];
-  };
 }
 
 export type JunctionStyle = "h2" | "v2" | "d2" | "x4" | "hp" | "vp";
@@ -52,11 +47,30 @@ export interface OfaWire {
   layer: string;
   width: number;
   startId: string;
-  startType: "port" | "junction";
+  startType: "port" | "junction" | "externalPort" | "includePort";
   startComponentId?: string;
   endId: string;
-  endType: "port" | "junction";
+  endType: "port" | "junction" | "externalPort" | "includePort";
   endComponentId?: string;
+}
+
+export interface OfaExternalPort {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  layer: string;
+  width: number;
+}
+
+export interface OfaInclude {
+  id: string;
+  file: string;
+  x: number;
+  y: number;
+  rotation: number;
+  flipH?: boolean;
+  flipV?: boolean;
 }
 
 export interface OfaDocument {
@@ -64,6 +78,8 @@ export interface OfaDocument {
   components: OfaComponent[];
   junctions: OfaJunction[];
   wires: OfaWire[];
+  externalPorts: OfaExternalPort[];
+  includes?: OfaInclude[];
 }
 
 // --- Enriched PDK types ---

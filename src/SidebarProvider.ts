@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { EnvironmentStatus } from "./types.js";
 import { checkEnvironment, selectAndInitializePdk } from "./environment.js";
+import { buildDependencyMap, buildHierarchyTree, HierarchyNode } from "./hierarchy.js";
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
   public static readonly viewId = "ofa.sidebarView";
@@ -38,8 +39,24 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         case "newSchematic":
           await this._createNewSchematic();
           break;
+        case "openSchematic": {
+          const fileUri = vscode.Uri.parse(msg.uri);
+          await vscode.commands.executeCommand("vscode.openWith", fileUri, "ofa.schematicEditor");
+          break;
+        }
       }
     });
+
+    const watcher = vscode.workspace.createFileSystemWatcher("**/*.ofa");
+    const debouncedRefresh = this._debounce(() => {
+      if (this._editorMode) {
+        this._renderEditorMode();
+      }
+    }, 500);
+    watcher.onDidCreate(debouncedRefresh);
+    watcher.onDidDelete(debouncedRefresh);
+    watcher.onDidChange(debouncedRefresh);
+    webviewView.onDidDispose(() => watcher.dispose());
 
     this.refresh();
   }
@@ -62,12 +79,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     if (!this._view) {
       return;
     }
-    const ofaFiles = await vscode.workspace.findFiles("**/*.ofa");
-    const fileNames = ofaFiles.map((f) => {
-      const rel = vscode.workspace.asRelativePath(f);
-      return { name: rel, uri: f.toString() };
-    });
-    this._view.webview.html = this._getEditorHtml(this._view.webview, fileNames);
+    const depMap = await buildDependencyMap();
+    const tree = buildHierarchyTree(depMap);
+    this._view.webview.html = this._getEditorHtml(this._view.webview, tree);
   }
 
   private async _createNewSchematic(): Promise<void> {
@@ -164,19 +178,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
   private _getEditorHtml(
     webview: vscode.Webview,
-    files: { name: string; uri: string }[]
+    tree: HierarchyNode[]
   ): string {
     const cssUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this._extensionUri, "media", "sidebar.css")
     );
 
-    const fileListHtml = files.length
-      ? files
-          .map(
-            (f) =>
-              `<li class="file-item" data-uri="${f.uri}">${f.name}</li>`
-          )
-          .join("\n")
+    const fileListHtml = tree.length
+      ? this._renderTreeHtml(tree)
       : `<li class="placeholder">No schematics yet</li>`;
 
     return /* html */ `<!DOCTYPE html>
@@ -193,7 +202,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         <span class="chevron">&#9656;</span> Design Hierarchy
       </button>
       <div class="panel-body" id="hierarchy-body">
-        <ul class="file-list">
+        <ul class="file-list tree-root">
           ${fileListHtml}
         </ul>
         <button class="action-btn" id="newSchematic">+ New Schematic</button>
@@ -237,7 +246,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const chevron = header.querySelector(".chevron");
         chevron.textContent = panel.classList.contains("collapsed") ? "\\u25B8" : "\\u25BE";
       });
-      // Start expanded — set chevron to down-pointing
       const chevron = header.querySelector(".chevron");
       chevron.textContent = "\\u25BE";
     });
@@ -249,13 +257,72 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       });
     }
 
-    document.querySelectorAll(".file-item").forEach((item) => {
-      item.addEventListener("click", () => {
-        vscode.postMessage({ command: "openSchematic", uri: item.dataset.uri });
+    document.querySelectorAll(".tree-toggle").forEach((toggle) => {
+      toggle.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const li = toggle.closest(".tree-item");
+        const children = li.querySelector(".tree-children");
+        if (!children) return;
+        const expanded = toggle.dataset.expanded === "true";
+        children.style.display = expanded ? "none" : "block";
+        toggle.textContent = expanded ? "\\u25B8" : "\\u25BE";
+        toggle.dataset.expanded = expanded ? "false" : "true";
+      });
+    });
+
+    document.querySelectorAll(".tree-row").forEach((row) => {
+      row.addEventListener("click", () => {
+        const uri = row.dataset.uri;
+        if (uri) {
+          vscode.postMessage({ command: "openSchematic", uri });
+        }
       });
     });
   </script>
 </body>
 </html>`;
+  }
+
+  private _renderTreeHtml(nodes: HierarchyNode[], depth: number = 0): string {
+    return nodes.map((node) => {
+      const hasChildren = node.children.length > 0;
+      const isCircular = node.name.endsWith("(circular)");
+      const indent = depth * 16;
+
+      if (isCircular) {
+        return `<li class="tree-item tree-leaf" style="padding-left: ${indent + 20}px;">
+          <span class="tree-icon">&#8635;</span>
+          <span class="tree-label circular">${this._esc(node.name)}</span>
+        </li>`;
+      }
+
+      const chevron = hasChildren
+        ? `<span class="tree-toggle" data-expanded="true">&#9662;</span>`
+        : `<span class="tree-icon">&#128196;</span>`;
+
+      const childrenHtml = hasChildren
+        ? `<ul class="tree-children">${this._renderTreeHtml(node.children, depth + 1)}</ul>`
+        : "";
+
+      return `<li class="tree-item ${hasChildren ? "tree-branch" : "tree-leaf"}" style="padding-left: ${indent}px;">
+        <div class="tree-row" data-uri="${node.uri}">
+          ${chevron}
+          <span class="tree-label">${this._esc(node.name)}</span>
+        </div>
+        ${childrenHtml}
+      </li>`;
+    }).join("\n");
+  }
+
+  private _esc(s: string): string {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  private _debounce(fn: () => void, ms: number): () => void {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    return () => {
+      if (timer) { clearTimeout(timer); }
+      timer = setTimeout(fn, ms);
+    };
   }
 }

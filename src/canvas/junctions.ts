@@ -29,10 +29,11 @@ export function isJunctionPinned(junctionId: string): boolean {
     (w.startType === "junction" && w.startId === junctionId) ||
     (w.endType === "junction" && w.endId === junctionId)
   );
-  // Pinned if directly connected to a port (ports are immutable)
+  // Pinned if directly connected to a port or external port (immutable anchors)
   for (const w of connected) {
     const isStart = w.startType === "junction" && w.startId === junctionId;
-    if ((isStart && w.endType === "port") || (!isStart && w.startType === "port")) {
+    const otherType = isStart ? w.endType : w.startType;
+    if (otherType === "port" || otherType === "externalPort" || otherType === "includePort") {
       return true;
     }
   }
@@ -194,6 +195,26 @@ export function deleteJunctionCascade(jId: string): void {
 export function deleteWireCascade(wId: string): void {
   if (!S.documentData) { return; }
   S.documentData.wires = S.documentData.wires.filter((w) => w.id !== wId);
+  cleanupOrphanedJunctions();
+}
+
+export function deleteIncludeCascade(incId: string): void {
+  if (!S.documentData) { return; }
+  S.documentData.includes = (S.documentData.includes ?? []).filter((inc) => inc.id !== incId);
+  S.documentData.wires = S.documentData.wires.filter((w) =>
+    !(w.startType === "includePort" && w.startComponentId === incId) &&
+    !(w.endType === "includePort" && w.endComponentId === incId)
+  );
+  cleanupOrphanedJunctions();
+}
+
+export function deleteExternalPortCascade(epId: string): void {
+  if (!S.documentData) { return; }
+  S.documentData.externalPorts = S.documentData.externalPorts.filter((ep) => ep.id !== epId);
+  S.documentData.wires = S.documentData.wires.filter((w) =>
+    !(w.startType === "externalPort" && w.startId === epId) &&
+    !(w.endType === "externalPort" && w.endId === epId)
+  );
   cleanupOrphanedJunctions();
 }
 

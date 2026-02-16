@@ -1,6 +1,6 @@
 // Global mutable state, constants, DOM refs, save mechanism, and utility helpers
 
-import type { Camera, DocumentData, PdkCellInfo, PdkPortInfo, SelectionState, WireAnchor } from "./types";
+import type { Camera, DocumentData, IncludeGeometry, PdkCellInfo, PdkPortInfo, SelectionState, WireAnchor } from "./types";
 
 // --- Constants ---
 
@@ -21,7 +21,9 @@ export const btnFlipH = document.getElementById("btnFlipH") as HTMLButtonElement
 export const btnFlipV = document.getElementById("btnFlipV") as HTMLButtonElement;
 export const btnExportGds = document.getElementById("btnExportGds") as HTMLButtonElement;
 export const btnWireMode = document.getElementById("btnWireMode") as HTMLButtonElement;
+export const btnExtPortMode = document.getElementById("btnExtPortMode") as HTMLButtonElement;
 export const wireLayerSelect = document.getElementById("wireLayerSelect") as HTMLSelectElement;
+export const includeSelect = document.getElementById("includeSelect") as HTMLSelectElement;
 
 // --- Camera (default zoom 200x so sub-micron devices are visible) ---
 
@@ -46,12 +48,15 @@ export const S = {
   wirePreviewEnd: null as { x: number; y: number } | null,
   wireJunctionChain: [] as string[],
   wireLastClickTime: 0,
+  externalPortMode: false,
 };
 
 // --- Caches ---
 
 export const componentSizeCache = new Map<string, { xsize: number; ysize: number; ports: PdkPortInfo[] }>();
 export const pendingQueries = new Set<string>();
+export const includeGeometryCache = new Map<string, IncludeGeometry>();
+export const pendingIncludeQueries = new Set<string>();
 
 // --- Debounced save ---
 
@@ -85,6 +90,16 @@ export function getSelectedJunction() {
 export function getSelectedWire() {
   if (!S.documentData || S.selection.type !== "wire" || !S.selection.id) { return null; }
   return S.documentData.wires.find((w) => w.id === S.selection.id) ?? null;
+}
+
+export function getSelectedExternalPort() {
+  if (!S.documentData || S.selection.type !== "externalPort" || !S.selection.id) { return null; }
+  return S.documentData.externalPorts.find((ep) => ep.id === S.selection.id) ?? null;
+}
+
+export function getSelectedInclude() {
+  if (!S.documentData || S.selection.type !== "include" || !S.selection.id) { return null; }
+  return (S.documentData.includes ?? []).find((inc) => inc.id === S.selection.id) ?? null;
 }
 
 export function updateToolbarSelection(): void {

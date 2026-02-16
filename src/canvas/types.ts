@@ -31,7 +31,6 @@ export interface OfaComponent {
   flipH?: boolean;
   flipV?: boolean;
   params: Record<string, number | string | boolean>;
-  _cache?: { xsize: number; ysize: number; ports: PdkPortInfo[] };
 }
 
 export type JunctionStyle = "h2" | "v2" | "d2" | "x4" | "hp" | "vp";
@@ -49,11 +48,37 @@ export interface OfaWire {
   layer: string;
   width: number;
   startId: string;
-  startType: "port" | "junction";
+  startType: "port" | "junction" | "externalPort" | "includePort";
   startComponentId?: string;
   endId: string;
-  endType: "port" | "junction";
+  endType: "port" | "junction" | "externalPort" | "includePort";
   endComponentId?: string;
+}
+
+export interface OfaExternalPort {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  layer: string;
+  width: number;
+}
+
+export interface IncludeGeometry {
+  xsize: number;
+  ysize: number;
+  /** Nested document with coords normalized to start at (0,0) */
+  document: DocumentData;
+}
+
+export interface OfaInclude {
+  id: string;
+  file: string;
+  x: number;
+  y: number;
+  rotation: number;
+  flipH?: boolean;
+  flipV?: boolean;
 }
 
 export interface DocumentData {
@@ -61,10 +86,12 @@ export interface DocumentData {
   components: OfaComponent[];
   junctions: OfaJunction[];
   wires: OfaWire[];
+  externalPorts: OfaExternalPort[];
+  includes?: OfaInclude[];
 }
 
 export interface WireAnchor {
-  type: "port" | "junction";
+  type: "port" | "junction" | "externalPort" | "includePort";
   id: string;
   componentId?: string;
   x: number;
@@ -72,7 +99,7 @@ export interface WireAnchor {
 }
 
 export interface SelectionState {
-  type: "none" | "component" | "junction" | "wire";
+  type: "none" | "component" | "junction" | "wire" | "externalPort" | "include";
   id: string | null;
 }
 
