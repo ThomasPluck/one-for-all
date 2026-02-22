@@ -20,7 +20,7 @@ export function cleanupOrphanedJunctions(): void {
 
 // --- Junction pinning ---
 
-export function isJunctionPinned(junctionId: string): boolean {
+export function isJunctionPinned(junctionId: string, dragAxis?: "H" | "V"): boolean {
   if (!S.documentData) { return true; }
   const j = S.documentData.junctions.find((jn) => jn.id === junctionId);
   if (!j) { return true; }
@@ -34,7 +34,19 @@ export function isJunctionPinned(junctionId: string): boolean {
     const isStart = w.startType === "junction" && w.startId === junctionId;
     const otherType = isStart ? w.endType : w.startType;
     if (otherType === "port" || otherType === "externalPort" || otherType === "includePort") {
-      return true;
+      if (!dragAxis) { return true; }
+      // Axis-aware: pinned only if the port wire is perpendicular to the drag axis
+      const otherPos = resolveAnchorPosition(
+        isStart ? w.endId : w.startId,
+        isStart ? w.endType : w.startType,
+        isStart ? w.endComponentId : w.startComponentId,
+      );
+      if (!otherPos) { return true; }
+      const isWireH = Math.abs(otherPos.y - j.y) < 0.001;
+      // Wire horizontal + drag H → not pinned (just extends/shortens wire)
+      // Wire horizontal + drag V → pinned (would break Manhattan)
+      if (isWireH && dragAxis === "V") { return true; }
+      if (!isWireH && dragAxis === "H") { return true; }
     }
   }
   return connected.length >= 5;
@@ -103,6 +115,7 @@ export function isDirectionAvailable(junctionId: string, dir: CardinalDir): bool
 function walkAxis(
   junctionId: string, fromWireId: string,
   movable: OfaJunction[], touched: Set<string>, visited: Set<string>,
+  dragAxis?: "H" | "V",
 ): void {
   if (!S.documentData || visited.has(junctionId)) { return; }
   visited.add(junctionId);
@@ -133,16 +146,16 @@ function walkAxis(
 
   if (farType !== "junction") { return; }
   touched.add(farId);
-  if (isJunctionPinned(farId)) { return; }
+  if (isJunctionPinned(farId, dragAxis)) { return; }
 
   const farJ = S.documentData.junctions.find((j) => j.id === farId);
   if (!farJ || movable.includes(farJ)) { return; }
 
   movable.push(farJ);
-  walkAxis(farId, continuation.id, movable, touched, visited);
+  walkAxis(farId, continuation.id, movable, touched, visited, dragAxis);
 }
 
-export function getCollinearRun(wire: OfaWire): CollinearRun {
+export function getCollinearRun(wire: OfaWire, dragAxis?: "H" | "V"): CollinearRun {
   const movable: OfaJunction[] = [];
   const touched = new Set<string>();
   if (!S.documentData) { return { junctions: movable, allTouchedIds: touched }; }
@@ -154,21 +167,31 @@ export function getCollinearRun(wire: OfaWire): CollinearRun {
     touched.add(epId);
 
     const epJ = S.documentData.junctions.find((j) => j.id === epId);
-    if (epJ && !isJunctionPinned(epId) && !movable.includes(epJ)) {
+    if (epJ && !isJunctionPinned(epId, dragAxis) && !movable.includes(epJ)) {
       movable.push(epJ);
     }
 
-    walkAxis(epId, wire.id, movable, touched, new Set<string>());
+    walkAxis(epId, wire.id, movable, touched, new Set<string>(), dragAxis);
   }
 
-  // If any junction in the chain is pinned, the entire chain is immovable
+  // If any junction in the chain is pinned for this drag axis, the entire chain is immovable
   for (const id of touched) {
-    if (isJunctionPinned(id)) {
+    if (isJunctionPinned(id, dragAxis)) {
       return { junctions: [], allTouchedIds: touched };
     }
   }
 
   return { junctions: movable, allTouchedIds: touched };
+}
+
+// --- Connected-wire queries ---
+
+export function entityHasWires(entityId: string, entityType: "port" | "externalPort" | "includePort"): boolean {
+  if (!S.documentData) { return false; }
+  return S.documentData.wires.some((w) =>
+    (w.startType === entityType && (entityType === "externalPort" ? w.startId === entityId : w.startComponentId === entityId)) ||
+    (w.endType === entityType && (entityType === "externalPort" ? w.endId === entityId : w.endComponentId === entityId))
+  );
 }
 
 // --- Cascade deletes ---

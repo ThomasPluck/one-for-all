@@ -111,3 +111,38 @@ export function clearSelection(): void {
   S.selection = { type: "none", id: null };
   updateToolbarSelection();
 }
+
+// --- Toast ---
+
+let _toastText = "";
+let _toastEnd = 0;
+
+export function showToast(msg: string, durationMs = 1500): void {
+  _toastText = msg;
+  _toastEnd = performance.now() + durationMs;
+}
+
+export function drawToast(w: number, _h: number): void {
+  if (!_toastText || performance.now() > _toastEnd) { return; }
+  const remaining = _toastEnd - performance.now();
+  const alpha = Math.min(1, remaining / 300);
+  ctx.save();
+  ctx.globalAlpha = alpha * 0.85;
+  ctx.font = "13px sans-serif";
+  const metrics = ctx.measureText(_toastText);
+  const pw = 12;
+  const ph = 8;
+  const bw = metrics.width + pw * 2;
+  const bh = 20 + ph * 2;
+  const bx = (w - bw) / 2;
+  const by = 12;
+  ctx.fillStyle = "#1e1e1e";
+  ctx.beginPath();
+  ctx.roundRect(bx, by, bw, bh, 6);
+  ctx.fill();
+  ctx.fillStyle = "#e0e0e0";
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "center";
+  ctx.fillText(_toastText, w / 2, by + bh / 2);
+  ctx.restore();
+}

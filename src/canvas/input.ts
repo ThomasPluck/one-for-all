@@ -2,10 +2,10 @@
 // wire drag, and toolbar button handlers
 
 import type { OfaExternalPort, OfaInclude, OfaJunction, OfaWire, WireAnchor } from "./types";
-import { S, canvas, camera, vscode, componentSizeCache, saveDocument, generateId, getSelectedComponent, getSelectedExternalPort, getSelectedInclude, getSelectedWire, updateToolbarSelection, clearSelection, btnRotate, btnFlipH, btnFlipV, btnExportGds, btnWireMode, btnExtPortMode, wireLayerSelect, componentSelect, includeSelect, includeGeometryCache, pendingIncludeQueries } from "./state";
+import { S, canvas, camera, vscode, componentSizeCache, saveDocument, generateId, getSelectedComponent, getSelectedExternalPort, getSelectedInclude, getSelectedWire, updateToolbarSelection, clearSelection, btnRotate, btnFlipH, btnFlipV, btnExportGds, btnWireMode, btnExtPortMode, wireLayerSelect, componentSelect, includeSelect, includeGeometryCache, pendingIncludeQueries, showToast } from "./state";
 import { getCellInfo, LAYER_COLORS } from "./pdk";
 import { screenToWorld, snapWireEnd, resolveAnchorPosition } from "./geometry";
-import { splitWireAtPoint, autoUpdateJunctionStyle, deleteComponentCascade, deleteExternalPortCascade, deleteIncludeCascade, deleteJunctionCascade, deleteWireCascade, getCollinearRun, classifyDirectionFromPoints, isDirectionAvailable, getOccupiedDirections } from "./junctions";
+import { splitWireAtPoint, autoUpdateJunctionStyle, deleteComponentCascade, deleteExternalPortCascade, deleteIncludeCascade, deleteJunctionCascade, deleteWireCascade, getCollinearRun, classifyDirectionFromPoints, isDirectionAvailable, getOccupiedDirections, entityHasWires } from "./junctions";
 import { hitTestComponent, hitTestExternalPort, hitTestInclude, hitTestIncludePort, hitTestJunction, hitTestWire, hitTestPort, updateHoverCursor } from "./hitTest";
 import { showParamOverlay, showExternalPortOverlay, showIncludeOverlay, showWireOverlay, closeParamOverlay, isParamOverlayOpen, isParamOverlayContaining } from "./overlays";
 
@@ -773,10 +773,14 @@ export function initEventListeners(): void {
       const epNormalHit = hitTestExternalPort(world.x, world.y);
       if (epNormalHit) {
         S.selection = { type: "externalPort", id: epNormalHit.id };
-        S.isDragging = true;
-        S.dragStartWorld = { x: world.x, y: world.y };
-        S.dragOrigPos = { x: epNormalHit.x, y: epNormalHit.y };
-        canvas.style.cursor = "move";
+        if (!entityHasWires(epNormalHit.id, "externalPort")) {
+          S.isDragging = true;
+          S.dragStartWorld = { x: world.x, y: world.y };
+          S.dragOrigPos = { x: epNormalHit.x, y: epNormalHit.y };
+          canvas.style.cursor = "move";
+        } else {
+          showToast("Disconnect wires before moving");
+        }
         updateToolbarSelection();
         return;
       }
@@ -784,10 +788,14 @@ export function initEventListeners(): void {
       const incNormalHit = hitTestInclude(world.x, world.y);
       if (incNormalHit) {
         S.selection = { type: "include", id: incNormalHit.id };
-        S.isDragging = true;
-        S.dragStartWorld = { x: world.x, y: world.y };
-        S.dragOrigPos = { x: incNormalHit.x, y: incNormalHit.y };
-        canvas.style.cursor = "move";
+        if (!entityHasWires(incNormalHit.id, "includePort")) {
+          S.isDragging = true;
+          S.dragStartWorld = { x: world.x, y: world.y };
+          S.dragOrigPos = { x: incNormalHit.x, y: incNormalHit.y };
+          canvas.style.cursor = "move";
+        } else {
+          showToast("Disconnect wires before moving");
+        }
         updateToolbarSelection();
         return;
       }
@@ -795,10 +803,14 @@ export function initEventListeners(): void {
       const hitComp = hitTestComponent(world.x, world.y);
       if (hitComp) {
         S.selection = { type: "component", id: hitComp.id };
-        S.isDragging = true;
-        S.dragStartWorld = { x: world.x, y: world.y };
-        S.dragOrigPos = { x: hitComp.x, y: hitComp.y };
-        canvas.style.cursor = "move";
+        if (!entityHasWires(hitComp.id, "port")) {
+          S.isDragging = true;
+          S.dragStartWorld = { x: world.x, y: world.y };
+          S.dragOrigPos = { x: hitComp.x, y: hitComp.y };
+          canvas.style.cursor = "move";
+        } else {
+          showToast("Disconnect wires before moving");
+        }
         updateToolbarSelection();
         return;
       }
@@ -920,7 +932,8 @@ export function initEventListeners(): void {
             const isH = Math.abs(end.y - start.y) < 0.001;
             const dx = world.x - S.dragStartWorld.x;
             const dy = world.y - S.dragStartWorld.y;
-            const run = getCollinearRun(w);
+            const dragAxis: "H" | "V" = isH ? "V" : "H";
+            const run = getCollinearRun(w, dragAxis);
 
             // Pass 1: compute the tightest allowed delta across ALL chain junctions
             let minDelta = -Infinity;
@@ -994,7 +1007,11 @@ export function initEventListeners(): void {
         if (S.selection.type === "wire") {
           const w = getSelectedWire();
           if (w) {
-            const run = getCollinearRun(w);
+            const start = resolveAnchorPosition(w.startId, w.startType, w.startComponentId);
+            const end = resolveAnchorPosition(w.endId, w.endType, w.endComponentId);
+            const isH = start && end && Math.abs(end.y - start.y) < 0.001;
+            const dragAxis: "H" | "V" = isH ? "V" : "H";
+            const run = getCollinearRun(w, dragAxis);
             for (const id of run.allTouchedIds) {
               autoUpdateJunctionStyle(id);
             }

@@ -2,7 +2,7 @@
 // selection, legend, scale bar, canvas resize, and the render loop
 
 import type { DocumentData, OfaComponent, OfaInclude } from "./types";
-import { S, JUNCTION_RADIUS, canvas, ctx, camera, componentSizeCache, wireLayerSelect, includeGeometryCache, getSelectedComponent, getSelectedJunction, getSelectedWire, getSelectedExternalPort, getSelectedInclude } from "./state";
+import { S, JUNCTION_RADIUS, canvas, ctx, camera, componentSizeCache, wireLayerSelect, includeGeometryCache, getSelectedComponent, getSelectedJunction, getSelectedWire, getSelectedExternalPort, getSelectedInclude, drawToast } from "./state";
 import { LAYER_COLORS, getCellInfo, getDeviceSize, layerColor } from "./pdk";
 import { resolveAnchorPosition, resolveAnchorInDoc, snapWireEnd } from "./geometry";
 import { computeJunctionColors } from "./junctions";
@@ -716,6 +716,7 @@ export function render(): void {
   // Screen-space overlays
   drawLegend(w, h);
   drawScaleBar(w, h);
+  drawToast(w, h);
 
   requestAnimationFrame(render);
 }
