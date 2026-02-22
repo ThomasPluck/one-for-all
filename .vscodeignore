@@ -3,7 +3,15 @@
 src/**
 node_modules/**
 .claude/**
+scratch/**
+credentials
 .gitignore
+.vscodeignore
 tsconfig.json
 esbuild.mjs
 **/*.map
+**/*.ts
+**/.venv/**
+.ofa-cache/**
+ofa-config.json
+*.vsix

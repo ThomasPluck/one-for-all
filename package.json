@@ -1,9 +1,14 @@
 {
-  "name": "one-for-all",
+  "name": "ofa-layout-as-schematic",
   "displayName": "One-For-All",
   "description": "A graphical parametric analog design flow",
-  "version": "0.0.1",
-  "publisher": "ofa",
+  "version": "0.0.2",
+  "publisher": "One-For-All",
+  "icon": "docs/favicon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ThomasPluck/one-for-all.git"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
