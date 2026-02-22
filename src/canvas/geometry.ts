@@ -49,10 +49,14 @@ export function transformIncludePortToWorld(inc: OfaInclude, localX: number, loc
   return { x: inc.x + px, y: inc.y + py };
 }
 
-export function resolveAnchorPosition(id: string, type: "port" | "junction" | "externalPort" | "includePort", componentId?: string): { x: number; y: number } | null {
+export function resolveAnchorPosition(id: string, type: "port" | "junction" | "externalPort" | "includePort" | "source", componentId?: string): { x: number; y: number } | null {
   if (type === "junction") {
     const j = S.documentData?.junctions.find((jn) => jn.id === id);
     return j ? { x: j.x, y: j.y } : null;
+  }
+  if (type === "source") {
+    const src = (S.documentData?.sources ?? []).find((s) => s.id === id);
+    return src ? { x: src.x, y: src.y } : null;
   }
   if (type === "externalPort") {
     const ep = S.documentData?.externalPorts.find((p) => p.id === id);

@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "path";
 import { PdkCellInfo, PdkConnectivityInfo, PdkLayerInfo } from "../types.js";
-import { readConfig, getComponentInfo, exportGds, getPdkAllDataStreaming } from "../pdk/pdkQuery.js";
+import { readConfig, getComponentInfo, exportGds, exportSpice, getPdkAllDataStreaming } from "../pdk/pdkQuery.js";
 import { getPdkPackageVersion, readCache, writeCache, clearCache } from "../pdk/pdkCache.js";
 import { GdsViewerPanel } from "../GdsViewerPanel.js";
 
@@ -158,6 +158,29 @@ export class OfaEditorProvider implements vscode.CustomTextEditorProvider {
             const errMsg = err instanceof Error ? err.message : String(err);
             webviewPanel.webview.postMessage({ type: "exportGdsResult", error: errMsg });
             vscode.window.showErrorMessage(`GDS export failed: ${errMsg}`);
+          }
+          break;
+        }
+        case "exportSpice": {
+          const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+          if (!root) {
+            webviewPanel.webview.postMessage({ type: "exportSpiceResult", error: "No workspace folder" });
+            break;
+          }
+          const spiceConfig = readConfig(root);
+          if (!spiceConfig) {
+            webviewPanel.webview.postMessage({ type: "exportSpiceResult", error: "No OFA config" });
+            break;
+          }
+          try {
+            await document.save();
+            const cirPath = await exportSpice(root, spiceConfig, document.uri.fsPath);
+            webviewPanel.webview.postMessage({ type: "exportSpiceResult", path: cirPath });
+            vscode.window.showInformationMessage(`SPICE exported: ${cirPath}`);
+          } catch (err: unknown) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            webviewPanel.webview.postMessage({ type: "exportSpiceResult", error: errMsg });
+            vscode.window.showErrorMessage(`SPICE export failed: ${errMsg}`);
           }
           break;
         }
@@ -401,6 +424,7 @@ export class OfaEditorProvider implements vscode.CustomTextEditorProvider {
     <div class="toolbar-group">
       <button id="btnWireMode" class="toolbar-btn" title="Wire mode (w)" style="font-size: 11px; width: auto; padding: 0 8px;">Wire</button>
       <button id="btnExtPortMode" class="toolbar-btn" title="External port (e)" style="font-size: 11px; width: auto; padding: 0 8px;">ExtPort</button>
+      <button id="btnSourceMode" class="toolbar-btn" title="Voltage source (s)" style="font-size: 11px; width: auto; padding: 0 8px;">Source</button>
       <label for="wireLayerSelect">Layer:</label>
       <select id="wireLayerSelect">
         <option value="">Loading...</option>
@@ -414,6 +438,7 @@ export class OfaEditorProvider implements vscode.CustomTextEditorProvider {
     </div>
     <div class="toolbar-group" style="margin-left: auto;">
       <button id="btnExportGds" class="toolbar-btn" title="Export GDS" style="font-size: 11px; width: auto; padding: 0 8px;">Export GDS</button>
+      <button id="btnExportSpice" class="toolbar-btn" title="Export SPICE" style="font-size: 11px; width: auto; padding: 0 8px;">Export SPICE</button>
     </div>
   </div>
   <div class="canvas-container">

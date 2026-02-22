@@ -47,10 +47,10 @@ export interface OfaWire {
   layer: string;
   width: number;
   startId: string;
-  startType: "port" | "junction" | "externalPort" | "includePort";
+  startType: "port" | "junction" | "externalPort" | "includePort" | "source";
   startComponentId?: string;
   endId: string;
-  endType: "port" | "junction" | "externalPort" | "includePort";
+  endType: "port" | "junction" | "externalPort" | "includePort" | "source";
   endComponentId?: string;
 }
 
@@ -73,6 +73,14 @@ export interface OfaInclude {
   flipV?: boolean;
 }
 
+export interface OfaSource {
+  id: string;
+  name: string;
+  voltage: number;
+  x: number;
+  y: number;
+}
+
 export interface OfaDocument {
   version: number;
   components: OfaComponent[];
@@ -80,6 +88,7 @@ export interface OfaDocument {
   wires: OfaWire[];
   externalPorts: OfaExternalPort[];
   includes?: OfaInclude[];
+  sources?: OfaSource[];
 }
 
 // --- Enriched PDK types ---

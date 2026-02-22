@@ -1,6 +1,6 @@
 // Hit testing for components, junctions, wires, and ports
 
-import type { OfaComponent, OfaExternalPort, OfaInclude, OfaJunction, OfaWire, WireAnchor } from "./types";
+import type { OfaComponent, OfaExternalPort, OfaInclude, OfaJunction, OfaSource, OfaWire, WireAnchor } from "./types";
 import { S, JUNCTION_RADIUS, canvas, camera, componentSizeCache, includeGeometryCache } from "./state";
 import { getCellInfo, getDeviceSize } from "./pdk";
 import { resolveAnchorPosition, transformPortToWorld, transformIncludePortToWorld, pointToSegmentDist } from "./geometry";
@@ -80,6 +80,35 @@ export function hitTestInclude(worldX: number, worldY: number): OfaInclude | nul
   return null;
 }
 
+const SOURCE_HIT_RADIUS = 0.225;
+
+export function hitTestSource(worldX: number, worldY: number): OfaSource | null {
+  if (!S.documentData) { return null; }
+  const sources = S.documentData.sources ?? [];
+  for (let i = sources.length - 1; i >= 0; i--) {
+    const src = sources[i];
+    const dx = worldX - src.x;
+    const dy = worldY - src.y;
+    if (dx * dx + dy * dy <= SOURCE_HIT_RADIUS * SOURCE_HIT_RADIUS) {
+      return src;
+    }
+  }
+  return null;
+}
+
+export function hitTestSourceAnchor(worldX: number, worldY: number): WireAnchor | null {
+  if (!S.documentData) { return null; }
+  const sources = S.documentData.sources ?? [];
+  for (const src of sources) {
+    const dx = worldX - src.x;
+    const dy = worldY - src.y;
+    if (dx * dx + dy * dy <= SOURCE_HIT_RADIUS * SOURCE_HIT_RADIUS) {
+      return { type: "source", id: src.id, x: src.x, y: src.y };
+    }
+  }
+  return null;
+}
+
 export function hitTestIncludePort(worldX: number, worldY: number): WireAnchor | null {
   if (!S.documentData) { return null; }
   const includes = S.documentData.includes ?? [];
@@ -133,6 +162,11 @@ export function updateHoverCursor(worldX: number, worldY: number): void {
   if (S.spaceHeld || S.wireMode) { return; }
   const j = hitTestJunction(worldX, worldY);
   if (j) { canvas.style.cursor = "pointer"; return; }
+  const src = hitTestSource(worldX, worldY);
+  if (src) {
+    canvas.style.cursor = S.selection.type === "source" && S.selection.id === src.id ? "move" : "pointer";
+    return;
+  }
   const ep = hitTestExternalPort(worldX, worldY);
   if (ep) { canvas.style.cursor = "pointer"; return; }
   const ip = hitTestIncludePort(worldX, worldY);

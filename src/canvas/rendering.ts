@@ -2,7 +2,7 @@
 // selection, legend, scale bar, canvas resize, and the render loop
 
 import type { DocumentData, OfaComponent, OfaInclude } from "./types";
-import { S, JUNCTION_RADIUS, canvas, ctx, camera, componentSizeCache, wireLayerSelect, includeGeometryCache, getSelectedComponent, getSelectedJunction, getSelectedWire, getSelectedExternalPort, getSelectedInclude, drawToast } from "./state";
+import { S, JUNCTION_RADIUS, canvas, ctx, camera, componentSizeCache, wireLayerSelect, includeGeometryCache, getSelectedComponent, getSelectedJunction, getSelectedWire, getSelectedExternalPort, getSelectedInclude, getSelectedSource, drawToast } from "./state";
 import { LAYER_COLORS, getCellInfo, getDeviceSize, layerColor } from "./pdk";
 import { resolveAnchorPosition, resolveAnchorInDoc, snapWireEnd } from "./geometry";
 import { computeJunctionColors } from "./junctions";
@@ -279,6 +279,74 @@ function drawExternalPorts(): void {
     ctx.textAlign = "center";
     ctx.textBaseline = "bottom";
     ctx.fillText(ep.name, 0, -s - fontSize * 0.3);
+
+    ctx.restore();
+  }
+}
+
+// --- Source (voltage / GND) rendering ---
+
+const SOURCE_RADIUS = JUNCTION_RADIUS * 1.5;
+
+function drawSources(): void {
+  if (!S.documentData) { return; }
+
+  for (const src of S.documentData.sources ?? []) {
+    ctx.save();
+    ctx.translate(src.x, src.y);
+
+    if (src.voltage === 0) {
+      // GND symbol: 3 horizontal lines decreasing in width
+      const lw = 1 / camera.zoom;
+      ctx.strokeStyle = "#8cc";
+      ctx.lineWidth = lw;
+      ctx.beginPath();
+      const w0 = SOURCE_RADIUS;
+      ctx.moveTo(-w0, 0); ctx.lineTo(w0, 0);
+      ctx.moveTo(-w0 * 0.6, SOURCE_RADIUS * 0.4); ctx.lineTo(w0 * 0.6, SOURCE_RADIUS * 0.4);
+      ctx.moveTo(-w0 * 0.25, SOURCE_RADIUS * 0.8); ctx.lineTo(w0 * 0.25, SOURCE_RADIUS * 0.8);
+      ctx.stroke();
+
+      // Label
+      const fontSize = Math.max(0.12, SOURCE_RADIUS * 0.7);
+      ctx.font = `bold ${fontSize}px sans-serif`;
+      ctx.fillStyle = "#8cc";
+      ctx.globalAlpha = 0.9;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      ctx.fillText("GND", 0, -SOURCE_RADIUS * 0.3);
+    } else {
+      // Voltage source: filled circle with + label
+      ctx.fillStyle = "#e8a030";
+      ctx.globalAlpha = 0.7;
+      ctx.beginPath();
+      ctx.arc(0, 0, SOURCE_RADIUS, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Outline
+      ctx.globalAlpha = 1.0;
+      ctx.strokeStyle = "rgba(255,255,255,0.6)";
+      ctx.lineWidth = 0.5 / camera.zoom;
+      ctx.stroke();
+
+      // + sign inside
+      const cr = SOURCE_RADIUS * 0.5;
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 1 / camera.zoom;
+      ctx.beginPath();
+      ctx.moveTo(-cr, 0); ctx.lineTo(cr, 0);
+      ctx.moveTo(0, -cr); ctx.lineTo(0, cr);
+      ctx.stroke();
+
+      // Label above
+      const fontSize = Math.max(0.12, SOURCE_RADIUS * 0.7);
+      ctx.font = `bold ${fontSize}px sans-serif`;
+      ctx.fillStyle = "#e8a030";
+      ctx.globalAlpha = 0.9;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      ctx.fillText(`${src.name} ${src.voltage}V`, 0, -SOURCE_RADIUS - fontSize * 0.3);
+    }
 
     ctx.restore();
   }
@@ -604,6 +672,19 @@ function drawSelection(): void {
     ctx.strokeRect(0, 0, w, h);
     ctx.setLineDash([]);
     ctx.restore();
+  } else if (S.selection.type === "source") {
+    const src = getSelectedSource();
+    if (!src) { return; }
+    const r = SOURCE_RADIUS * 1.5;
+    ctx.save();
+    ctx.strokeStyle = "#ffcc00";
+    ctx.lineWidth = 2 / camera.zoom;
+    ctx.setLineDash([6 / camera.zoom, 4 / camera.zoom]);
+    ctx.beginPath();
+    ctx.arc(src.x, src.y, r, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
   }
 }
 
@@ -709,6 +790,7 @@ export function render(): void {
   drawComponents();
   drawJunctions();
   drawExternalPorts();
+  drawSources();
   drawSelection();
 
   ctx.restore();

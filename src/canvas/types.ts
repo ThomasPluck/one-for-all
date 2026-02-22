@@ -48,10 +48,10 @@ export interface OfaWire {
   layer: string;
   width: number;
   startId: string;
-  startType: "port" | "junction" | "externalPort" | "includePort";
+  startType: "port" | "junction" | "externalPort" | "includePort" | "source";
   startComponentId?: string;
   endId: string;
-  endType: "port" | "junction" | "externalPort" | "includePort";
+  endType: "port" | "junction" | "externalPort" | "includePort" | "source";
   endComponentId?: string;
 }
 
@@ -81,6 +81,14 @@ export interface OfaInclude {
   flipV?: boolean;
 }
 
+export interface OfaSource {
+  id: string;
+  name: string;
+  voltage: number;
+  x: number;
+  y: number;
+}
+
 export interface DocumentData {
   version: number;
   components: OfaComponent[];
@@ -88,10 +96,11 @@ export interface DocumentData {
   wires: OfaWire[];
   externalPorts: OfaExternalPort[];
   includes?: OfaInclude[];
+  sources?: OfaSource[];
 }
 
 export interface WireAnchor {
-  type: "port" | "junction" | "externalPort" | "includePort";
+  type: "port" | "junction" | "externalPort" | "includePort" | "source";
   id: string;
   componentId?: string;
   x: number;
@@ -99,7 +108,7 @@ export interface WireAnchor {
 }
 
 export interface SelectionState {
-  type: "none" | "component" | "junction" | "wire" | "externalPort" | "include";
+  type: "none" | "component" | "junction" | "wire" | "externalPort" | "include" | "source";
   id: string | null;
 }
 

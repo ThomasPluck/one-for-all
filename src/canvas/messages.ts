@@ -1,7 +1,7 @@
 // Extension message handling (window "message" event listener)
 
 import type { IncludeGeometry, PdkCellInfo } from "./types";
-import { S, componentSizeCache, pendingQueries, vscode, componentSelect, includeSelect, includeGeometryCache, pendingIncludeQueries, btnExportGds, saveDocument, clearSelection } from "./state";
+import { S, componentSizeCache, pendingQueries, vscode, componentSelect, includeSelect, includeGeometryCache, pendingIncludeQueries, btnExportGds, btnExportSpice, saveDocument, clearSelection } from "./state";
 import { applyPdkLayers, getCellInfo } from "./pdk";
 
 function populateSelect(select: HTMLSelectElement, items: { name: string }[], placeholder: string): void {
@@ -28,6 +28,7 @@ export function initMessageHandler(): void {
         if (S.documentData && !S.documentData.wires) { S.documentData.wires = []; }
         if (S.documentData && !S.documentData.externalPorts) { S.documentData.externalPorts = []; }
         if (S.documentData && !S.documentData.includes) { S.documentData.includes = []; }
+        if (S.documentData && !S.documentData.sources) { S.documentData.sources = []; }
         if (S.selection.type === "component" && S.selection.id) {
           const stillExists = S.documentData!.components.some((c) => c.id === S.selection.id);
           if (!stillExists) { clearSelection(); }
@@ -42,6 +43,9 @@ export function initMessageHandler(): void {
           if (!stillExists) { clearSelection(); }
         } else if (S.selection.type === "include" && S.selection.id) {
           const stillExists = (S.documentData!.includes ?? []).some((inc) => inc.id === S.selection.id);
+          if (!stillExists) { clearSelection(); }
+        } else if (S.selection.type === "source" && S.selection.id) {
+          const stillExists = (S.documentData!.sources ?? []).some((s) => s.id === S.selection.id);
           if (!stillExists) { clearSelection(); }
         }
         if (S.documentData) {
@@ -113,6 +117,14 @@ export function initMessageHandler(): void {
         btnExportGds.textContent = "Export GDS";
         if (msg.error) {
           console.warn(`OFA: GDS export failed: ${msg.error}`);
+        }
+        break;
+      }
+      case "exportSpiceResult": {
+        btnExportSpice.disabled = false;
+        btnExportSpice.textContent = "Export SPICE";
+        if (msg.error) {
+          console.warn(`OFA: SPICE export failed: ${msg.error}`);
         }
         break;
       }

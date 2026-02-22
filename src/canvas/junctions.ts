@@ -186,8 +186,14 @@ export function getCollinearRun(wire: OfaWire, dragAxis?: "H" | "V"): CollinearR
 
 // --- Connected-wire queries ---
 
-export function entityHasWires(entityId: string, entityType: "port" | "externalPort" | "includePort"): boolean {
+export function entityHasWires(entityId: string, entityType: "port" | "externalPort" | "includePort" | "source"): boolean {
   if (!S.documentData) { return false; }
+  if (entityType === "source") {
+    return S.documentData.wires.some((w) =>
+      (w.startType === "source" && w.startId === entityId) ||
+      (w.endType === "source" && w.endId === entityId)
+    );
+  }
   return S.documentData.wires.some((w) =>
     (w.startType === entityType && (entityType === "externalPort" ? w.startId === entityId : w.startComponentId === entityId)) ||
     (w.endType === entityType && (entityType === "externalPort" ? w.endId === entityId : w.endComponentId === entityId))
@@ -237,6 +243,16 @@ export function deleteExternalPortCascade(epId: string): void {
   S.documentData.wires = S.documentData.wires.filter((w) =>
     !(w.startType === "externalPort" && w.startId === epId) &&
     !(w.endType === "externalPort" && w.endId === epId)
+  );
+  cleanupOrphanedJunctions();
+}
+
+export function deleteSourceCascade(srcId: string): void {
+  if (!S.documentData) { return; }
+  S.documentData.sources = (S.documentData.sources ?? []).filter((s) => s.id !== srcId);
+  S.documentData.wires = S.documentData.wires.filter((w) =>
+    !(w.startType === "source" && w.startId === srcId) &&
+    !(w.endType === "source" && w.endId === srcId)
   );
   cleanupOrphanedJunctions();
 }

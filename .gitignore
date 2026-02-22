@@ -6,3 +6,4 @@ ofa-config.json
 scratch/
 .ofa-cache/
 credentials
+*.local.json

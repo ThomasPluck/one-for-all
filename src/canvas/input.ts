@@ -1,13 +1,13 @@
 // Mouse handlers, keyboard handlers, pan/zoom, wire drawing, component drag,
 // wire drag, and toolbar button handlers
 
-import type { OfaExternalPort, OfaInclude, OfaJunction, OfaWire, WireAnchor } from "./types";
-import { S, canvas, camera, vscode, componentSizeCache, saveDocument, generateId, getSelectedComponent, getSelectedExternalPort, getSelectedInclude, getSelectedWire, updateToolbarSelection, clearSelection, btnRotate, btnFlipH, btnFlipV, btnExportGds, btnWireMode, btnExtPortMode, wireLayerSelect, componentSelect, includeSelect, includeGeometryCache, pendingIncludeQueries, showToast } from "./state";
+import type { OfaExternalPort, OfaInclude, OfaJunction, OfaSource, OfaWire, WireAnchor } from "./types";
+import { S, canvas, camera, vscode, componentSizeCache, saveDocument, generateId, getSelectedComponent, getSelectedExternalPort, getSelectedInclude, getSelectedWire, getSelectedSource, updateToolbarSelection, clearSelection, btnRotate, btnFlipH, btnFlipV, btnExportGds, btnExportSpice, btnWireMode, btnExtPortMode, btnSourceMode, wireLayerSelect, componentSelect, includeSelect, includeGeometryCache, pendingIncludeQueries, showToast } from "./state";
 import { getCellInfo, LAYER_COLORS } from "./pdk";
 import { screenToWorld, snapWireEnd, resolveAnchorPosition } from "./geometry";
-import { splitWireAtPoint, autoUpdateJunctionStyle, deleteComponentCascade, deleteExternalPortCascade, deleteIncludeCascade, deleteJunctionCascade, deleteWireCascade, getCollinearRun, classifyDirectionFromPoints, isDirectionAvailable, getOccupiedDirections, entityHasWires } from "./junctions";
-import { hitTestComponent, hitTestExternalPort, hitTestInclude, hitTestIncludePort, hitTestJunction, hitTestWire, hitTestPort, updateHoverCursor } from "./hitTest";
-import { showParamOverlay, showExternalPortOverlay, showIncludeOverlay, showWireOverlay, closeParamOverlay, isParamOverlayOpen, isParamOverlayContaining } from "./overlays";
+import { splitWireAtPoint, autoUpdateJunctionStyle, deleteComponentCascade, deleteExternalPortCascade, deleteIncludeCascade, deleteJunctionCascade, deleteWireCascade, deleteSourceCascade, getCollinearRun, classifyDirectionFromPoints, isDirectionAvailable, getOccupiedDirections, entityHasWires } from "./junctions";
+import { hitTestComponent, hitTestExternalPort, hitTestInclude, hitTestIncludePort, hitTestJunction, hitTestWire, hitTestPort, hitTestSource, hitTestSourceAnchor, updateHoverCursor } from "./hitTest";
+import { showParamOverlay, showExternalPortOverlay, showIncludeOverlay, showWireOverlay, showSourceOverlay, closeParamOverlay, isParamOverlayOpen, isParamOverlayContaining } from "./overlays";
 
 // --- Toolbar button handlers ---
 
@@ -63,8 +63,10 @@ export function initToolbar(): void {
   btnWireMode.addEventListener("click", () => {
     S.wireMode = !S.wireMode;
     S.externalPortMode = false;
+    S.sourceMode = false;
     btnWireMode.classList.toggle("active", S.wireMode);
     btnExtPortMode.classList.remove("active");
+    btnSourceMode.classList.remove("active");
     if (!S.wireMode) {
       terminateWireDrawing();
     }
@@ -74,10 +76,29 @@ export function initToolbar(): void {
   btnExtPortMode.addEventListener("click", () => {
     S.externalPortMode = !S.externalPortMode;
     S.wireMode = false;
+    S.sourceMode = false;
     terminateWireDrawing();
     btnExtPortMode.classList.toggle("active", S.externalPortMode);
     btnWireMode.classList.remove("active");
+    btnSourceMode.classList.remove("active");
     canvas.style.cursor = S.externalPortMode ? "crosshair" : "default";
+  });
+
+  btnSourceMode.addEventListener("click", () => {
+    S.sourceMode = !S.sourceMode;
+    S.wireMode = false;
+    S.externalPortMode = false;
+    terminateWireDrawing();
+    btnSourceMode.classList.toggle("active", S.sourceMode);
+    btnWireMode.classList.remove("active");
+    btnExtPortMode.classList.remove("active");
+    canvas.style.cursor = S.sourceMode ? "crosshair" : "default";
+  });
+
+  btnExportSpice.addEventListener("click", () => {
+    btnExportSpice.disabled = true;
+    btnExportSpice.textContent = "Exporting...";
+    vscode.postMessage({ type: "exportSpice" });
   });
 }
 
@@ -433,6 +454,12 @@ export function initEventListeners(): void {
 
     const world = screenToWorld(e.clientX, e.clientY);
 
+    const srcHit = hitTestSource(world.x, world.y);
+    if (srcHit) {
+      showSourceOverlay(srcHit, e.clientX, e.clientY);
+      return;
+    }
+
     const epHit = hitTestExternalPort(world.x, world.y);
     if (epHit) {
       showExternalPortOverlay(epHit, e.clientX, e.clientY);
@@ -500,6 +527,13 @@ export function initEventListeners(): void {
         e.preventDefault();
         return;
       }
+      if (S.sourceMode) {
+        S.sourceMode = false;
+        btnSourceMode.classList.remove("active");
+        canvas.style.cursor = "default";
+        e.preventDefault();
+        return;
+      }
     }
 
     if (e.key === "w" || e.key === "W") {
@@ -510,6 +544,12 @@ export function initEventListeners(): void {
 
     if (e.key === "e" || e.key === "E") {
       btnExtPortMode.click();
+      e.preventDefault();
+      return;
+    }
+
+    if (e.key === "s" || e.key === "S") {
+      btnSourceMode.click();
       e.preventDefault();
       return;
     }
@@ -579,6 +619,11 @@ export function initEventListeners(): void {
         clearSelection();
         saveDocument();
         e.preventDefault();
+      } else if (S.selection.type === "source" && S.selection.id) {
+        deleteSourceCascade(S.selection.id);
+        clearSelection();
+        saveDocument();
+        e.preventDefault();
       }
     }
   });
@@ -645,6 +690,13 @@ export function initEventListeners(): void {
             S.wireJunctionChain = [];
             return;
           }
+          const srcStart = hitTestSourceAnchor(world.x, world.y);
+          if (srcStart) {
+            S.wireStartAnchor = srcStart;
+            S.wireDrawing = true;
+            S.wireJunctionChain = [];
+            return;
+          }
           const wireHit = hitTestWire(world.x, world.y);
           if (wireHit) {
             const splitJ = splitWireAtPoint(wireHit, world.x, world.y);
@@ -693,6 +745,13 @@ export function initEventListeners(): void {
           const ipEnd = hitTestIncludePort(rawEnd.x, rawEnd.y);
           if (ipEnd) {
             completeWireToPort(ipEnd);
+            return;
+          }
+
+          // Source hit → terminate
+          const srcEnd = hitTestSourceAnchor(rawEnd.x, rawEnd.y);
+          if (srcEnd) {
+            completeWireToJunction(srcEnd);
             return;
           }
 
@@ -761,7 +820,43 @@ export function initEventListeners(): void {
         return;
       }
 
+      // --- SOURCE PLACEMENT MODE ---
+      if (S.sourceMode && S.documentData) {
+        if (!S.documentData.sources) { S.documentData.sources = []; }
+        const nextIdx = S.documentData.sources.length + 1;
+        const newSrc: OfaSource = {
+          id: generateId(),
+          name: nextIdx === 1 ? "GND" : `V${nextIdx}`,
+          voltage: nextIdx === 1 ? 0 : 1.2,
+          x: Math.round(world.x * 100) / 100,
+          y: Math.round(world.y * 100) / 100,
+        };
+        S.documentData.sources.push(newSrc);
+        S.selection = { type: "source", id: newSrc.id };
+        S.sourceMode = false;
+        btnSourceMode.classList.remove("active");
+        canvas.style.cursor = "default";
+        saveDocument();
+        updateToolbarSelection();
+        return;
+      }
+
       // --- NORMAL MODE ---
+
+      const srcNormalHit = hitTestSource(world.x, world.y);
+      if (srcNormalHit) {
+        S.selection = { type: "source", id: srcNormalHit.id };
+        if (!entityHasWires(srcNormalHit.id, "source")) {
+          S.isDragging = true;
+          S.dragStartWorld = { x: world.x, y: world.y };
+          S.dragOrigPos = { x: srcNormalHit.x, y: srcNormalHit.y };
+          canvas.style.cursor = "move";
+        } else {
+          showToast("Disconnect wires before moving");
+        }
+        updateToolbarSelection();
+        return;
+      }
 
       const jHit = hitTestJunction(world.x, world.y);
       if (jHit) {
@@ -922,6 +1017,14 @@ export function initEventListeners(): void {
           const dy = world.y - S.dragStartWorld.y;
           inc.x = Math.round((S.dragOrigPos.x + dx) * 100) / 100;
           inc.y = Math.round((S.dragOrigPos.y + dy) * 100) / 100;
+        }
+      } else if (S.selection.type === "source") {
+        const src = getSelectedSource();
+        if (src) {
+          const dx = world.x - S.dragStartWorld.x;
+          const dy = world.y - S.dragStartWorld.y;
+          src.x = Math.round((S.dragOrigPos.x + dx) * 100) / 100;
+          src.y = Math.round((S.dragOrigPos.y + dy) * 100) / 100;
         }
       } else if (S.selection.type === "wire") {
         const w = getSelectedWire();

@@ -20,8 +20,10 @@ export const btnRotate = document.getElementById("btnRotate") as HTMLButtonEleme
 export const btnFlipH = document.getElementById("btnFlipH") as HTMLButtonElement;
 export const btnFlipV = document.getElementById("btnFlipV") as HTMLButtonElement;
 export const btnExportGds = document.getElementById("btnExportGds") as HTMLButtonElement;
+export const btnExportSpice = document.getElementById("btnExportSpice") as HTMLButtonElement;
 export const btnWireMode = document.getElementById("btnWireMode") as HTMLButtonElement;
 export const btnExtPortMode = document.getElementById("btnExtPortMode") as HTMLButtonElement;
+export const btnSourceMode = document.getElementById("btnSourceMode") as HTMLButtonElement;
 export const wireLayerSelect = document.getElementById("wireLayerSelect") as HTMLSelectElement;
 export const includeSelect = document.getElementById("includeSelect") as HTMLSelectElement;
 
@@ -49,6 +51,7 @@ export const S = {
   wireJunctionChain: [] as string[],
   wireLastClickTime: 0,
   externalPortMode: false,
+  sourceMode: false,
 };
 
 // --- Caches ---
@@ -100,6 +103,11 @@ export function getSelectedExternalPort() {
 export function getSelectedInclude() {
   if (!S.documentData || S.selection.type !== "include" || !S.selection.id) { return null; }
   return (S.documentData.includes ?? []).find((inc) => inc.id === S.selection.id) ?? null;
+}
+
+export function getSelectedSource() {
+  if (!S.documentData || S.selection.type !== "source" || !S.selection.id) { return null; }
+  return (S.documentData.sources ?? []).find((s) => s.id === S.selection.id) ?? null;
 }
 
 export function updateToolbarSelection(): void {

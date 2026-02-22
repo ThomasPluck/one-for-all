@@ -1,9 +1,9 @@
 // Parameter editing overlay and wire editing overlay (DOM modals)
 
-import type { OfaComponent, OfaExternalPort, OfaInclude, OfaWire } from "./types";
+import type { OfaComponent, OfaExternalPort, OfaInclude, OfaSource, OfaWire } from "./types";
 import { S, saveDocument, vscode, pendingQueries, componentSizeCache, clearSelection } from "./state";
 import { LAYER_COLORS, getCellInfo } from "./pdk";
-import { autoUpdateJunctionStyle, deleteComponentCascade, deleteExternalPortCascade, deleteIncludeCascade, deleteWireCascade } from "./junctions";
+import { autoUpdateJunctionStyle, deleteComponentCascade, deleteExternalPortCascade, deleteIncludeCascade, deleteSourceCascade, deleteWireCascade } from "./junctions";
 
 let paramOverlay: HTMLDivElement | null = null;
 
@@ -315,6 +315,101 @@ export function showIncludeOverlay(inc: OfaInclude, screenX: number, screenY: nu
 
   btnRow.appendChild(deleteBtn);
   btnRow.appendChild(openBtn);
+  overlay.appendChild(btnRow);
+
+  document.body.appendChild(overlay);
+  const rect = overlay.getBoundingClientRect();
+  if (rect.right > window.innerWidth) {
+    overlay.style.left = `${window.innerWidth - rect.width - 8}px`;
+  }
+  if (rect.bottom > window.innerHeight) {
+    overlay.style.top = `${window.innerHeight - rect.height - 8}px`;
+  }
+
+  paramOverlay = overlay;
+}
+
+export function showSourceOverlay(src: OfaSource, screenX: number, screenY: number): void {
+  closeParamOverlay();
+
+  const overlay = document.createElement("div");
+  overlay.style.cssText = `
+    position: fixed; left: ${screenX}px; top: ${screenY}px;
+    background: var(--vscode-editor-background, #1e1e1e);
+    border: 1px solid var(--vscode-focusBorder, #007fd4);
+    border-radius: 4px; padding: 8px; min-width: 180px;
+    z-index: 1000; font-family: var(--vscode-font-family, sans-serif);
+    font-size: 12px; color: var(--vscode-editor-foreground, #ccc);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+  `;
+
+  const header = document.createElement("div");
+  header.style.cssText = "font-weight: bold; margin-bottom: 6px; padding-bottom: 4px; border-bottom: 1px solid rgba(255,255,255,0.1);";
+  header.textContent = `Source [${src.id.substring(0, 6)}]`;
+  overlay.appendChild(header);
+
+  const nameRow = document.createElement("div");
+  nameRow.style.cssText = "display: flex; align-items: center; margin: 3px 0; gap: 6px;";
+  const nameLabel = document.createElement("label");
+  nameLabel.style.cssText = "flex: 0 0 60px; text-align: right; opacity: 0.7;";
+  nameLabel.textContent = "Name";
+  nameRow.appendChild(nameLabel);
+  const nameInput = document.createElement("input");
+  nameInput.type = "text";
+  nameInput.value = src.name;
+  nameInput.style.cssText = `flex: 1; background: var(--vscode-input-background, #3c3c3c); color: var(--vscode-input-foreground, #ccc); border: 1px solid var(--vscode-input-border, #555); border-radius: 2px; padding: 2px 4px; font-size: 11px; font-family: var(--vscode-editor-font-family, monospace);`;
+  nameRow.appendChild(nameInput);
+  overlay.appendChild(nameRow);
+
+  const voltRow = document.createElement("div");
+  voltRow.style.cssText = "display: flex; align-items: center; margin: 3px 0; gap: 6px;";
+  const voltLabel = document.createElement("label");
+  voltLabel.style.cssText = "flex: 0 0 60px; text-align: right; opacity: 0.7;";
+  voltLabel.textContent = "Voltage";
+  voltRow.appendChild(voltLabel);
+  const voltInput = document.createElement("input");
+  voltInput.type = "number";
+  voltInput.step = "0.1";
+  voltInput.value = String(src.voltage);
+  voltInput.style.cssText = `flex: 1; background: var(--vscode-input-background, #3c3c3c); color: var(--vscode-input-foreground, #ccc); border: 1px solid var(--vscode-input-border, #555); border-radius: 2px; padding: 2px 4px; font-size: 11px; font-family: var(--vscode-editor-font-family, monospace);`;
+  voltRow.appendChild(voltInput);
+  overlay.appendChild(voltRow);
+
+  const btnRow = document.createElement("div");
+  btnRow.style.cssText = "display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px; padding-top: 4px; border-top: 1px solid rgba(255,255,255,0.1);";
+
+  const applyBtn = document.createElement("button");
+  applyBtn.textContent = "Apply";
+  applyBtn.style.cssText = `background: var(--vscode-button-background, #007fd4); color: var(--vscode-button-foreground, #fff); border: none; border-radius: 2px; padding: 3px 12px; cursor: pointer; font-size: 11px;`;
+  applyBtn.addEventListener("click", () => {
+    const liveSrc = (S.documentData?.sources ?? []).find((s) => s.id === src.id);
+    if (!liveSrc || !S.documentData) { closeParamOverlay(); return; }
+    liveSrc.name = nameInput.value.trim() || liveSrc.name;
+    liveSrc.voltage = Number(voltInput.value) || 0;
+    saveDocument();
+    closeParamOverlay();
+  });
+
+  const cancelBtn = document.createElement("button");
+  cancelBtn.textContent = "Cancel";
+  cancelBtn.style.cssText = `background: var(--vscode-button-secondaryBackground, #3c3c3c); color: var(--vscode-button-secondaryForeground, #ccc); border: none; border-radius: 2px; padding: 3px 12px; cursor: pointer; font-size: 11px;`;
+  cancelBtn.addEventListener("click", closeParamOverlay);
+
+  const deleteBtn = document.createElement("button");
+  deleteBtn.textContent = "Delete";
+  deleteBtn.style.cssText = `background: #a02020; color: #fff; border: none; border-radius: 2px; padding: 3px 12px; cursor: pointer; font-size: 11px; margin-right: auto;`;
+  deleteBtn.addEventListener("click", () => {
+    if (S.documentData) {
+      deleteSourceCascade(src.id);
+      clearSelection();
+      saveDocument();
+    }
+    closeParamOverlay();
+  });
+
+  btnRow.appendChild(deleteBtn);
+  btnRow.appendChild(cancelBtn);
+  btnRow.appendChild(applyBtn);
   overlay.appendChild(btnRow);
 
   document.body.appendChild(overlay);
