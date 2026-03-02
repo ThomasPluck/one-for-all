@@ -464,7 +464,18 @@ sources = {s["id"]: s for s in ofa.get("sources", [])}
 wires = ofa.get("wires", [])
 errors = []
 
-# --- Union-Find for net extraction ---
+# --- Phase 1: Classify wires as ideal vs resistive ---
+ideal_wires = []
+resistive_wires = []
+for wire in wires:
+    layer = wire.get("layer", "Metal1")
+    rsh = RSH.get(layer, 0)
+    if rsh > 0:
+        resistive_wires.append(wire)
+    else:
+        ideal_wires.append(wire)
+
+# --- Phase 2: Union-Find — only ideal wires merge nodes ---
 parent = {}
 def find(x):
     while parent.get(x, x) != x:
@@ -492,24 +503,26 @@ def anchor_key(ep, wire):
         return f"incport:{c}:{i}"
     return f"{t}:{i}"
 
-# Build connectivity
+# Register ALL anchors from every wire (ideal + resistive)
 for wire in wires:
-    a = anchor_key("start", wire)
-    b = anchor_key("end", wire)
-    parent.setdefault(a, a)
-    parent.setdefault(b, b)
-    union(a, b)
+    for ep in ("start", "end"):
+        k = anchor_key(ep, wire)
+        parent.setdefault(k, k)
+# Register disconnected sources/ext ports too
+for sid in sources:
+    parent.setdefault(f"source:{sid}", f"source:{sid}")
+for epid in ext_ports:
+    parent.setdefault(f"extport:{epid}", f"extport:{epid}")
 
-# Assign net names
+# Only merge anchors connected by IDEAL wires (zero or unknown Rsh)
+for wire in ideal_wires:
+    union(anchor_key("start", wire), anchor_key("end", wire))
+
+# --- Phase 3: Assign node names per UF group ---
 net_names = {}
 auto_idx = [1]
-def get_net(key):
-    root = find(key)
-    if root in net_names:
-        return net_names[root]
-    return None
 
-# First pass: name nets from sources and external ports
+# Sources name their UF group
 for sid, src in sources.items():
     key = find(f"source:{sid}")
     if src["voltage"] == 0 or src["name"].upper() == "GND":
@@ -517,22 +530,24 @@ for sid, src in sources.items():
     else:
         net_names[key] = src["name"]
 
+# External ports name their UF group
 for epid, ep in ext_ports.items():
     key = find(f"extport:{epid}")
     if key not in net_names:
         net_names[key] = ep["name"]
 
-# Second pass: auto-name remaining
+# Auto-name remaining UF groups
 for key in parent:
     root = find(key)
     if root not in net_names:
         net_names[root] = f"n{auto_idx[0]}"
         auto_idx[0] += 1
 
-def net_for(ep, wire):
-    key = anchor_key(ep, wire)
-    root = find(key)
-    return net_names.get(root, "?")
+def node_of(ep, wire):
+    return net_names.get(find(anchor_key(ep, wire)), "?")
+
+def node_for_key(k):
+    return net_names.get(find(k), "?")
 
 # --- Instantiate components using VLSIR ---
 spice_lines = []
@@ -578,13 +593,7 @@ for comp_id, comp in components.items():
     for sp in port_order:
         comp_port = inv_map.get(sp)
         if comp_port:
-            # Find the net for this port
-            key = f"port:{comp_id}:{comp_port}"
-            if key in parent:
-                root = find(key)
-                port_nets.append(net_names.get(root, "0"))
-            else:
-                port_nets.append("0")
+            port_nets.append(node_for_key(f"port:{comp_id}:{comp_port}"))
         else:
             port_nets.append("0")  # unconnected (e.g. bulk)
 
@@ -601,7 +610,7 @@ for comp_id, comp in components.items():
     params_str = " ".join(param_strs)
     spice_lines.append(f"{inst_name} {nets_str} {model} {params_str}")
 
-# --- Wire parasitic resistors (all layers with known Rsh) ---
+# --- Wire parasitic resistors (resistive wires only) ---
 resistor_lines = []
 r_idx = 1
 
@@ -614,15 +623,13 @@ def resolve_pos(ep_type, ep_id):
         return (ext_ports[ep_id]["x"], ext_ports[ep_id]["y"])
     return None
 
-for wire in wires:
+for wire in resistive_wires:
     layer = wire.get("layer", "Metal1")
-    rsh = RSH.get(layer)
-    if not rsh:
-        continue
-    sn = net_for("start", wire)
-    en = net_for("end", wire)
+    rsh = RSH.get(layer, 0)
+    sn = node_of("start", wire)
+    en = node_of("end", wire)
     if sn == en:
-        continue
+        continue  # both endpoints merged by ideal wire elsewhere
     s_pos = resolve_pos(wire["startType"], wire["startId"])
     e_pos = resolve_pos(wire["endType"], wire["endId"])
     if not s_pos or not e_pos:
@@ -642,8 +649,7 @@ vsource_lines = []
 for sid, src in sources.items():
     if src["voltage"] == 0 or src["name"].upper() == "GND":
         continue
-    key = find(f"source:{sid}")
-    net = net_names.get(key, src["name"])
+    net = node_for_key(f"source:{sid}")
     vsource_lines.append(f"V_{src['name']} {net} 0 DC {src['voltage']}")
 
 # --- Model library paths ---
